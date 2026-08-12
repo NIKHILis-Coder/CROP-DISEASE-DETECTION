@@ -76,10 +76,10 @@ def _load_class_names() -> list[str]:
     return sorted(load_split_manifests()["train"]["label"].unique())
 
 
+import tensorflow as tf  # noqa: E402 -- needed by preprocess(), not just loading
+
 print("Loading model and class names...")
 try:
-    import tensorflow as tf
-
     MODEL = tf.keras.models.load_model(MODEL_PATH)
     CLASS_NAMES = _load_class_names()
     STARTUP_ERROR = None
@@ -94,17 +94,37 @@ except Exception as exc:  # noqa: BLE001 -- surface any startup failure via /hea
 def preprocess(image: Image.Image) -> np.ndarray:
     """Turn a PIL image into exactly the tensor the model was trained on.
 
-    Mirrors src/data_loader._decode_and_resize + _normalize:
-        RGB -> resize to IMAGE_SIZE (bilinear) -> float32 -> divide by 255
-    then adds the leading batch dimension the model expects.
+    Mirrors src/data_loader._decode_and_resize + _normalize, step for step:
+        RGB -> tf.image.resize to IMAGE_SIZE -> round to uint8 -> / 255.0
+
+    WHY tf.image.resize AND NOT PIL's OWN .resize()
+    -----------------------------------------------
+    They are not equivalent, and the difference is big enough to change
+    predictions. Pillow's `Image.BILINEAR` applies an antialiasing filter when
+    downscaling, averaging over a support region that scales with the reduction
+    factor. `tf.image.resize` with the default `antialias=False` does not -- it
+    samples. Going from 256x256 to 64x64 is a 4x reduction, where that
+    distinction is severe.
+
+    Measured on three test leaves: max per-pixel difference 0.19 (on a 0-1
+    scale), and the predicted class changed on 2 of 3 images. The model was
+    trained on the TensorFlow version, so the TensorFlow version is what it must
+    be served. Using PIL here would have degraded every prediction silently --
+    no error, no warning, just worse answers.
+
+    The `round -> uint8 -> /255` sequence looks redundant but is deliberate: the
+    training pipeline caches images as uint8, so it quantises at exactly this
+    point. Reproducing that keeps inference bit-comparable with training.
     """
     # Convert first: a PNG may be RGBA or greyscale, and the model wants 3
     # channels. Doing this before resizing avoids surprises with alpha.
-    image = image.convert("RGB")
-    image = image.resize(IMAGE_SIZE, Image.BILINEAR)
+    array = np.asarray(image.convert("RGB"), dtype=np.uint8)
 
-    array = np.asarray(image, dtype=np.float32) / 255.0
-    return np.expand_dims(array, axis=0)  # (1, H, W, 3)
+    resized = tf.image.resize(tf.constant(array), IMAGE_SIZE)
+    quantised = tf.cast(tf.round(resized), tf.uint8)
+    normalised = tf.cast(quantised, tf.float32) / 255.0
+
+    return tf.expand_dims(normalised, axis=0).numpy()  # (1, H, W, 3)
 
 
 def pretty(name: str) -> str:

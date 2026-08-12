@@ -1070,3 +1070,133 @@ conflated, or a mislabelled training image. An error it was 35% sure about is ju
 the model saying it does not know, which tells you little you could act on.
 Sorting errors by confidence is a fast way to find the structural problems rather
 than the noise.
+
+---
+
+## Phase 6 — Flask app
+
+### What was built
+
+- **`app/app.py`** — three routes: `GET /` (upload page), `POST /predict`
+  (top-3 predictions as JSON), `GET /health` (liveness, 503 if the model failed
+  to load). Model and class names load once at startup.
+- **`app/templates/index.html`** — single page with drag-and-drop upload, image
+  preview, confidence bars, and a domain-gap disclaimer.
+- **`app/static/style.css`** — plain CSS, no framework.
+- **`app/README.md`** — run instructions and the full error-handling table.
+
+Tested end to end: server started, three real leaf images posted via `curl`,
+JSON verified, three UI screenshots captured with a headless browser, server
+stopped.
+
+### Why — design decisions
+
+**Why Flask rather than Django or FastAPI?** The app is two meaningful routes.
+Django would bring an ORM, migrations and an admin panel that would all sit
+unused — its value shows up on database-backed applications with many models,
+which this is not. FastAPI would be the better choice for a pure JSON API with
+generated docs and async I/O, but this app renders an HTML page and does
+CPU-bound synchronous inference, so async buys nothing. Flask does exactly what
+is needed and nothing else, which also means a reviewer can read the whole
+server in one sitting.
+
+**Why load the model once at startup rather than per request?** Loading a Keras
+model means reading the file, rebuilding the graph and allocating weights. Doing
+that inside the request handler would add that cost to *every* prediction and
+would hold multiple copies of the model in memory under concurrent load. Loading
+once at import time means a request only runs a forward pass. The trade-off is
+slower startup and needing a restart to pick up a retrained model — both fine
+here, and it is the standard production pattern too. The failure mode to handle
+is that startup loading can fail, which is why the load is wrapped in a
+`try/except` and `/health` reports 503 rather than the app dying silently.
+
+**Why inference preprocessing must match training exactly — and how it bit me.**
+This is the most valuable thing in this phase. The first implementation resized
+with Pillow's `Image.BILINEAR`, which looks like the obvious equivalent of
+`tf.image.resize(..., 'bilinear')`. It is not. **Pillow applies an antialiasing
+filter when downscaling; `tf.image.resize` with the default `antialias=False`
+does not** — it samples. Going 256×256 → 64×64 is a 4× reduction, where that
+distinction is severe.
+
+Measured on three test leaves: **max per-pixel difference 0.19** on a 0–1 scale,
+and **the predicted class changed on 2 of 3 images**. A healthy leaf was
+confidently called Bacterial spot at 90%. There was no error, no warning, no
+crash — just quietly wrong answers, which is the worst kind of bug.
+
+The fix was to use the identical TensorFlow op in the app, reproducing the
+training pipeline step for step including its intermediate `round → uint8`
+quantisation. After the fix: max difference **0.0157** (residual JPEG-decoder
+variation between PIL and `tf.io.decode_jpeg`) and **0 disagreements**; the same
+healthy leaf now scores 98.2% healthy.
+
+Two habits came out of this: the app **imports `IMAGE_SIZE` from
+`src/data_loader.py`** rather than hardcoding it, so a retrain at a different
+resolution cannot desynchronise them; and class names come from
+`sorted(unique labels)` — the exact expression training used — because any other
+ordering would mislabel every prediction while looking entirely plausible.
+
+**Why return top-3 with confidences instead of just the argmax?** Several of
+these diseases genuinely look alike, and a single label hides how close the call
+was. "Early blight 51%, Late blight 47%" is far more honest, and more actionable,
+than "Early blight" presented as certain. It also surfaces the model's failure
+modes to the user instead of hiding them — which matters especially for a model
+that is 76.76% accurate, not 99%.
+
+### Error handling
+
+Every failure returns JSON with a helpful message and a correct status code —
+never a stack trace, and never internal detail:
+
+| Situation | Status | Behaviour |
+|---|---|---|
+| No file field | 400 | "No file was uploaded…" |
+| Empty filename | 400 | "No file was selected." |
+| Wrong extension | 400 | Names the rejected type |
+| Empty file | 400 | "The uploaded file is empty." |
+| Corrupt / not an image | 400 | Caught via `Image.load()` forcing a full decode |
+| Over 8 MB | 413 | Flask `MAX_CONTENT_LENGTH` |
+| Model not loaded | 503 | Tells the user to train first |
+| Inference raised | 500 | Generic message; traceback to server log only |
+
+`debug=False` deliberately: the reloader would load the model twice, and the
+interactive debugger must never be exposed by a demo left running.
+
+### Likely interview questions
+
+**Q: What happens to this app under real production load?**
+A: As written, it would not survive much. `app.run()` is Flask's development
+server — single-process, and not built for concurrency. The first fix is to put
+it behind a WSGI server such as Gunicorn or Waitress with several workers.
+That immediately raises a memory question: each worker loads its own copy of the
+model, so N workers means N times the model's footprint — fine for a 1.4 MB model
+like this one, a real constraint for a 500 MB one, where the answer is a
+dedicated inference service (TensorFlow Serving) that several lightweight web
+workers call. Beyond that: batching concurrent requests to amortise inference,
+a request-size limit (already present), rate limiting, and a real object store
+for uploads rather than holding them in memory. I would also add structured
+logging of prediction distributions, because the way you find out a model has
+gone stale in production is usually that its confidence distribution drifts.
+
+**Q: How would you know if the deployed model started performing badly?**
+A: Not from accuracy, because production has no labels. The practical signals
+are indirect: monitor the **confidence distribution** — a model fed inputs
+unlike its training data tends to get less confident, or confidently wrong in
+new patterns — and the **predicted-class distribution**, since a sudden spike in
+one class usually means input drift rather than a real outbreak. Both are
+computable without ground truth. Beyond that I would sample a small fraction of
+real uploads for manual labelling to get a genuine accuracy estimate over time.
+For this model specifically the expected failure is the domain gap: users
+uploading field photos rather than lab shots, which is exactly the distribution
+shift the confidence monitor would catch first.
+
+**Q: Someone uploads a photo of a dog. What does your app do, and is that OK?**
+A: It confidently returns a tomato disease, because a softmax over 10 classes
+must sum to 1 — the model has no way to say "none of these". That is a genuine
+limitation, not a bug I can fix with better error handling. The honest mitigations
+are: showing the top-3 with confidences so absurd outputs are at least visible;
+adding a confidence threshold below which the app says "not sure, is this a
+tomato leaf?"; or properly, training an out-of-distribution detector or adding a
+"not a leaf" class with negative examples. For a portfolio demo I chose the first
+two-thirds of that — surface the uncertainty, and state the scope in a disclaimer
+on the page — and I would flag OOD detection as required work before anything
+like this went in front of real users.

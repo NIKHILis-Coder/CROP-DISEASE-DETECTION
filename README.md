@@ -389,8 +389,45 @@ converged result.
 
 ## Usage
 
-*Coming soon (Phase 6).* Will cover: how to run the Flask app locally and how
-to classify your own leaf photo.
+![App screenshot](notebooks/figures/app_screenshots/02_prediction_diseased.png)
+
+### Run the web app
+
+```bash
+# from the repository root, with the venv active
+cd app
+python app.py
+```
+
+Open **http://localhost:5000**, upload a tomato leaf photo, and the app returns
+the top three predictions with confidence bars.
+
+### API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/` | Upload page |
+| `POST` | `/predict` | Image file field `file` → top-3 predictions as JSON |
+| `GET` | `/health` | Liveness check; 503 if the model failed to load |
+
+```bash
+curl -X POST http://localhost:5000/predict \
+     -F "file=@data/raw/tomato/Tomato___Septoria_leaf_spot/some_leaf.JPG"
+```
+
+```json
+{
+  "top_prediction": "Septoria Leaf Spot",
+  "confidence": 0.998,
+  "predictions": [
+    {"class": "Septoria_leaf_spot", "label": "Septoria Leaf Spot", "confidence": 0.998},
+    {"class": "Late_blight", "label": "Late Blight", "confidence": 0.0006},
+    {"class": "Bacterial_spot", "label": "Bacterial Spot", "confidence": 0.0006}
+  ]
+}
+```
+
+See [`app/README.md`](app/README.md) for the full error-handling table.
 
 ---
 
