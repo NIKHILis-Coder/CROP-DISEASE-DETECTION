@@ -1,0 +1,28 @@
+# Normalise line endings for text, and protect binaries from ever being touched.
+#
+# This matters because core.autocrlf=true on Windows rewrites LF to CRLF on
+# checkout for anything Git decides is text. Git's binary auto-detection is
+# usually right, but a PDF is largely ASCII and can be misclassified -- and a
+# single byte rewritten inside a compressed stream corrupts the whole file.
+# Declaring binaries explicitly removes the guesswork.
+
+# Default: let Git normalise text files in the repository to LF.
+* text=auto
+
+# --- Binaries: never convert line endings, never try to diff ---
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.keras binary
+*.h5    binary
+*.zip   binary
+
+# --- Notebooks -------------------------------------------------------------
+# Treated as text so diffs are readable, but marked so GitHub's language stats
+# do not report this as a "Jupyter Notebook" project when most of the work is
+# in src/.
+*.ipynb text linguist-detectable=false
+
+# --- Keep shell scripts LF even on Windows ---------------------------------
+*.sh    text eol=lf
