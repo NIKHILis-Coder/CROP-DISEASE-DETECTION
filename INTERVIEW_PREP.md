@@ -630,6 +630,108 @@ after both have first come down together. If the gap persisted past five or six
 epochs I would suspect something structural — and I would check the augmentation
 was not accidentally applied to validation, which Phase 3 already tests for.
 
+### The cache experiment — a measured negative result
+
+After the first benchmark showed 8.6 min/epoch, the obvious suspicion was that
+decoding 12,712 JPEGs on every epoch was wasted work. So I added a `tf.data`
+cache and measured. **It produced no speedup.** The result is kept here in full
+because a profiled negative result is worth more than an unmeasured assumption.
+
+**What was cached, and where in the pipeline.** The cache sits immediately after
+decode + resize, which is the expensive stage whose output never changes:
+
+```
+read → decode → resize 128×128        expensive, deterministic
+[normalise]                           val/test only
+CACHE                                 ← everything above runs once
+shuffle                               must be AFTER cache
+batch
+[normalise]                           train only
+augment                               must be AFTER cache
+prefetch
+```
+
+**Why `shuffle` and `augment` must sit after the cache.** `cache()` records what
+a stage produces and replays it identically forever. Anything random placed
+*before* it gets frozen: a shuffle before the cache yields one fixed ordering for
+the entire run, and augmentation before the cache yields one fixed set of
+distortions — which would silently destroy most of augmentation's value while
+still looking like it was working. This is the subtle trap in `tf.data` caching,
+and it is invisible unless you deliberately test for it. The Phase 3 checks
+(train differs between passes, val identical) are exactly that test.
+
+**Why uint8 and not float32.** The cache stores the resized image *before*
+normalisation, so pixels stay one byte per channel instead of four:
+
+| | per image | × 12,712 train images |
+|---|---|---|
+| uint8 (128×128×3) | 49,152 B | **~596 MB** |
+| float32 (128×128×3) | 196,608 B | **~2,384 MB** |
+
+A 4× saving for identical benefit, because the divide-by-255 is arithmetically
+trivial next to JPEG decoding — there is no reason to spend four bytes storing
+what one byte plus a cheap multiply reproduces. Measured on-disk cache came out
+at **595.9 MB**, matching the prediction.
+
+Validation and test are the opposite case and *are* cached as float32
+(**510.8 MB** measured): they are never augmented and never shuffled, so their
+batches are byte-identical every epoch, and caching post-normalisation means
+zero per-epoch work rather than a cheap-but-nonzero multiply.
+
+**Why disk-backed rather than in-memory.** The machine has 7.3 GB of RAM with
+only **~491 MB genuinely available**. Training needs ~596 MB (train, uint8) plus
+~511 MB (val, float32) ≈ **1.1 GB of cache**. An in-memory cache that does not
+fit does not fail loudly — the OS pages it to disk, giving a disk cache with
+extra copying on top, which is strictly worse than asking `tf.data` to use the
+disk deliberately. Measuring available RAM *before* choosing the backend turned a
+likely thrashing run into a clean one.
+
+**The result:**
+
+| Epoch | Time | |
+|---|---:|---|
+| 1 — fills cache, full JPEG decode | 504.0 s | 8.4 min |
+| 2 — reads from cache | 518.8 s | 8.6 min |
+| **Speedup** | **0.97×** | *slightly slower* |
+
+**Why it didn't help: the workload is compute-bound, not I/O-bound.** Counting
+multiply-accumulates in the forward pass, per image:
+
+| Layer | Output | MACs |
+|---|---|---:|
+| conv1 | 128×128×32, kernel 3×3×3 | 16,384 × 32 × 27 ≈ **14.2 M** |
+| conv2 | 64×64×64, kernel 3×3×32 | 4,096 × 64 × 288 ≈ **75.5 M** |
+| conv3 | 32×32×128, kernel 3×3×64 | 1,024 × 128 × 576 ≈ **75.5 M** |
+| | | **≈ 165 M MACs / image** |
+
+Backpropagation costs roughly twice the forward pass, so ≈ 495 M MACs per image
+per step, × 12,712 images ≈ **6.3 TMACs per epoch**. At 504 s that is ~12.5
+GMAC/s sustained on an **AMD Ryzen 5 5500U (6 cores / 12 threads, 2.1 GHz
+base)** — entirely consistent with a mobile CPU running oneDNN convolutions.
+The arithmetic accounts for essentially the whole epoch time, leaving no room
+for I/O to have been the constraint.
+
+In other words, the Phase 3 pipeline was *already* keeping the model fed:
+`num_parallel_calls=AUTOTUNE` decoded images across cores while `prefetch`
+overlapped that with compute, so decoding was fully hidden behind the model's
+own arithmetic. Caching removed work that was not on the critical path.
+
+**Why the code was kept anyway.** It is correct, it is off by one argument
+(`cache=False`), and on a machine where the model is cheaper or the storage
+slower it would help. It also came with a verification harness proving the
+cached pipeline is bit-identical to the uncached one (max abs diff
+`0.0000000000` on val and test), which is worth having regardless. The honest
+summary is: *the optimisation was measured, it did not help on this hardware,
+and the measurement explains why.*
+
+**What would actually speed this up**, in order of expected effect: reducing the
+input size (halving to 96×96 roughly halves the MACs, at a real cost to the fine
+texture that separates Septoria leaf spot from Target Spot); giving conv1 a
+stride of 2 so the most expensive layer runs at half resolution; or simply using
+a GPU, where this model would train in minutes. None of those are free, which is
+the point — the cache looked free, and that is precisely why it was worth
+measuring rather than assuming.
+
 **Q: Why run a one-epoch benchmark at all instead of just training?**
 A: Two reasons, and the second is the one people underrate. First, it converts an
 unknown into a number: 8.6 minutes per epoch means 30 epochs is 4.3 hours, which

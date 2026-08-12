@@ -62,6 +62,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / "tomato"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
+# Where the tf.data disk cache lives. Ignored by Git (only *.csv is tracked
+# under data/processed/). Delete this folder if the raw images ever change --
+# a stale cache would silently keep serving the old data.
+CACHE_DIR = PROCESSED_DIR / "cache"
+
+# Cache backend: "disk" or "memory".
+#
+# Caching stores the decoded, resized images so that JPEG decoding happens once
+# on the first epoch instead of on every epoch. That is the single biggest
+# speedup available here, because decoding 12,712 JPEGs per epoch is pure
+# repeated work -- the pixels never change.
+#
+# We default to DISK rather than memory because this machine has ~7.3 GB of RAM
+# with well under 1 GB genuinely available, while the training cache alone needs
+# ~600 MB and validation another ~500 MB. An in-memory cache that does not fit
+# gets paged out by the OS, which is a disk cache with extra copying -- strictly
+# worse than asking tf.data to use the disk deliberately. On a machine with
+# RAM to spare, "memory" is faster; set CACHE_BACKEND accordingly.
+CACHE_BACKEND = "disk"
+
 # 128x128 is the compromise between detail and CPU training time.
 #
 # The source images are 256x256. Halving each side quarters the pixel count, so
@@ -190,10 +210,20 @@ def load_split_manifests() -> dict[str, pd.DataFrame]:
 
 # --- Step 3: the tf.data pipeline ------------------------------------------
 
-def _decode_image(path: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
-    """Read one JPEG from disk and turn it into a normalised tensor.
+def _decode_and_resize(path: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+    """Read one JPEG and resize it, returning **uint8** pixels (0-255).
 
-    Runs inside the tf.data graph, once per image, in parallel across CPU cores.
+    This is the expensive step -- and the one worth caching, because its output
+    never changes. Deliberately stops short of normalising so the cached tensor
+    stays uint8: one byte per channel instead of four.
+
+        12,712 training images at 128x128x3
+            as uint8   ->  ~600 MB
+            as float32 -> ~2,400 MB
+
+    Caching before the divide-by-255 therefore costs a quarter of the space for
+    exactly the same saved work, since the division itself is trivially cheap
+    compared with JPEG decoding.
     """
     image = tf.io.read_file(path)
 
@@ -203,16 +233,24 @@ def _decode_image(path: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tens
     image = tf.io.decode_jpeg(image, channels=3)
 
     # Resize 256x256 -> 128x128. Bilinear (the default) averages neighbouring
-    # pixels, which is the right choice when shrinking.
+    # pixels, which is the right choice when shrinking. tf.image.resize returns
+    # float32, so cast back to uint8 to keep the cache small.
     image = tf.image.resize(image, IMAGE_SIZE)
-
-    # Scale pixels from 0-255 to 0-1. Neural networks train poorly on raw
-    # 0-255 inputs: large input values produce large gradients, which makes the
-    # optimiser take wildly sized steps. Small, consistently scaled inputs keep
-    # training stable.
-    image = image / 255.0
+    image = tf.cast(tf.round(image), tf.uint8)
 
     return image, label
+
+
+def _normalize(image: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+    """Scale uint8 pixels (0-255) to float32 in [0, 1].
+
+    Neural networks train poorly on raw 0-255 inputs: large input values produce
+    large gradients, which makes the optimiser take wildly sized steps. Small,
+    consistently scaled inputs keep training stable.
+
+    Shape-agnostic, so it works on a single image or a whole batch.
+    """
+    return tf.cast(image, tf.float32) / 255.0, label
 
 
 def make_dataset(
@@ -220,12 +258,35 @@ def make_dataset(
     class_names: list[str],
     *,
     shuffle: bool,
+    augmentation: tf.keras.Sequential | None = None,
+    cache_normalized: bool = False,
+    cache_name: str | None = None,
     batch_size: int = BATCH_SIZE,
 ) -> tf.data.Dataset:
     """Build a batched tf.data pipeline from a manifest.
 
+    PIPELINE ORDER -- and why each step sits where it does
+    ------------------------------------------------------
+        read + decode + resize     expensive, output never changes
+        [normalise]                val/test only -- see cache_normalized
+        CACHE                      <-- everything above runs once, ever
+        shuffle                    must be AFTER cache, or the cache would
+                                   freeze a single shuffled order forever
+        batch
+        [normalise]                train only: on batches, after the cache,
+                                   so the cached tensors stay uint8
+        augment                    must be AFTER cache, or every epoch would
+                                   see the SAME frozen distortions
+        prefetch                   overlap data prep with model compute
+
+    The two "must be after cache" rules are the subtle part. `cache()` records
+    the elements a stage produces and replays them identically on later epochs.
+    Anything random placed *before* it gets recorded too -- so a shuffle before
+    the cache yields one fixed order, and augmentation before the cache yields
+    one fixed set of distortions, silently destroying most of their value.
+
     `shuffle` should be True for training and False for val/test -- evaluation
-    order does not matter, and keeping it fixed makes results easier to compare.
+    order does not matter, and keeping it fixed makes results comparable.
     """
     # Labels become integer indices (0-9): "Bacterial_spot" -> 0, etc. The order
     # comes from class_names and must stay consistent everywhere, which is why
@@ -237,22 +298,60 @@ def make_dataset(
 
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
 
+    # num_parallel_calls=AUTOTUNE decodes several images at once across CPU
+    # cores, so disk reads and JPEG decoding do not starve the model of data.
+    ds = ds.map(_decode_and_resize, num_parallel_calls=AUTOTUNE)
+
+    # Validation and test are never augmented, so their pixels are identical on
+    # every epoch -- which means normalisation can happen once, before the
+    # cache, and the cache serves ready-to-use float32 tensors. Training caches
+    # uint8 instead, to keep the (much larger) training cache small.
+    if cache_normalized:
+        ds = ds.map(_normalize, num_parallel_calls=AUTOTUNE)
+
+    ds = _apply_cache(ds, cache_name)
+
     if shuffle:
         # A buffer as large as the split means a true full shuffle. Reshuffling
         # every epoch means batches differ run to run, which helps the model
         # generalise rather than memorise batch composition.
         ds = ds.shuffle(len(paths), seed=SEED, reshuffle_each_iteration=True)
 
-    # num_parallel_calls=AUTOTUNE decodes several images at once across CPU
-    # cores, so disk reads and JPEG decoding do not starve the model of data.
-    ds = ds.map(_decode_image, num_parallel_calls=AUTOTUNE)
     ds = ds.batch(batch_size)
+
+    # Training normalises here: after the cache (so the cache stays uint8) and
+    # on whole batches (cheaper than per-image).
+    if not cache_normalized:
+        ds = ds.map(_normalize, num_parallel_calls=AUTOTUNE)
+
+    if augmentation is not None:
+        # training=True is essential: Keras preprocessing layers are
+        # deliberately no-ops at inference time, so without it these layers
+        # would pass images through untouched.
+        ds = ds.map(
+            lambda x, y: (augmentation(x, training=True), y),
+            num_parallel_calls=AUTOTUNE,
+        )
 
     # prefetch overlaps data preparation with training: while the model works
     # through batch N, the CPU is already building batch N+1.
-    ds = ds.prefetch(AUTOTUNE)
+    return ds.prefetch(AUTOTUNE)
 
-    return ds
+
+def _apply_cache(ds: tf.data.Dataset, cache_name: str | None) -> tf.data.Dataset:
+    """Attach the cache, on disk or in memory, or not at all.
+
+    Disk caching writes a `<name>.index` + `<name>.data-*` pair. Those files
+    live under data/processed/, which Git ignores apart from the manifests.
+    """
+    if cache_name is None:
+        return ds
+
+    if CACHE_BACKEND == "memory":
+        return ds.cache()
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return ds.cache(str(CACHE_DIR / cache_name))
 
 
 # --- Step 4: augmentation (training only) ----------------------------------
@@ -317,11 +416,12 @@ def build_augmentation() -> tf.keras.Sequential:
 
 
 def apply_augmentation(ds: tf.data.Dataset, augmentation: tf.keras.Sequential) -> tf.data.Dataset:
-    """Map the augmentation layers over a dataset.
+    """Map the augmentation layers over an already-built dataset.
 
-    `training=True` is essential: Keras preprocessing layers are deliberately
-    no-ops at inference time, so without it these layers would pass images
-    through untouched.
+    Kept for use outside the main pipeline (the Phase 3 notebook uses it to
+    demonstrate augmentation on a fixed batch). Inside `make_dataset`,
+    augmentation is applied in-line so it lands in the correct position
+    relative to the cache.
     """
     return ds.map(
         lambda x, y: (augmentation(x, training=True), y),
@@ -335,6 +435,7 @@ def load_splits(
     *,
     batch_size: int = BATCH_SIZE,
     augment_train: bool = True,
+    cache: bool = True,
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset, list[str]]:
     """Build the train/val/test pipelines in one call.
 
@@ -345,6 +446,10 @@ def load_splits(
     images. Augmenting them would measure the model on distorted inputs no user
     will ever submit, and would make scores wobble run to run as the random
     distortions changed.
+
+    `cache=True` decodes and resizes each image once and reuses the result on
+    every later epoch. The first epoch is no faster (it does the work and fills
+    the cache); every epoch after it skips JPEG decoding entirely.
     """
     splits = load_split_manifests()
 
@@ -352,12 +457,38 @@ def load_splits(
     # machines. The saved model's output index 3 must always mean the same class.
     class_names = sorted(splits["train"]["label"].unique())
 
-    train_ds = make_dataset(splits["train"], class_names, shuffle=True, batch_size=batch_size)
-    val_ds = make_dataset(splits["val"], class_names, shuffle=False, batch_size=batch_size)
-    test_ds = make_dataset(splits["test"], class_names, shuffle=False, batch_size=batch_size)
+    train_ds = make_dataset(
+        splits["train"],
+        class_names,
+        shuffle=True,
+        # Applied inside make_dataset so it lands after the cache.
+        augmentation=build_augmentation() if augment_train else None,
+        # Cache uint8: the training cache is by far the largest, and the
+        # divide-by-255 is cheap enough to redo each epoch.
+        cache_normalized=False,
+        cache_name="train" if cache else None,
+        batch_size=batch_size,
+    )
 
-    if augment_train:
-        train_ds = apply_augmentation(train_ds, build_augmentation())
+    # Val and test are never augmented and never shuffled, so their batches are
+    # identical every epoch -- normalise before caching and the cache serves
+    # finished float32 tensors with no per-epoch work at all.
+    val_ds = make_dataset(
+        splits["val"],
+        class_names,
+        shuffle=False,
+        cache_normalized=True,
+        cache_name="val" if cache else None,
+        batch_size=batch_size,
+    )
+    test_ds = make_dataset(
+        splits["test"],
+        class_names,
+        shuffle=False,
+        cache_normalized=True,
+        cache_name="test" if cache else None,
+        batch_size=batch_size,
+    )
 
     return train_ds, val_ds, test_ds, class_names
 

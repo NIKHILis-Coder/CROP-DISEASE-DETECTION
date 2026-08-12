@@ -46,6 +46,9 @@ FIGURES_DIR = PROJECT_ROOT / "notebooks" / "figures"
 
 DEFAULT_EPOCHS = 30
 EARLY_STOPPING_PATIENCE = 5
+# Shorter than the early-stopping patience on purpose: try a smaller learning
+# rate before giving up on the run entirely.
+REDUCE_LR_PATIENCE = 3
 
 
 # --- Class weights ---------------------------------------------------------
@@ -102,41 +105,90 @@ def report_class_weights(class_weights: dict[int, float], class_names: list[str]
 
 # --- Benchmark mode --------------------------------------------------------
 
-def run_benchmark(model: tf.keras.Model, train_ds, val_ds, class_weights, epochs: int) -> None:
-    """Train for exactly one epoch, time it, and extrapolate."""
+class EpochTimer(tf.keras.callbacks.Callback):
+    """Record how long each epoch takes.
+
+    Needed because with caching the first epoch is unrepresentative: it does all
+    the JPEG decoding *and* fills the cache. The steady-state cost is what
+    epoch 2 onwards shows, and that is the number worth extrapolating from.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.times: list[float] = []
+        self._start = 0.0
+
+    def on_epoch_begin(self, epoch, logs=None) -> None:
+        self._start = time.perf_counter()
+
+    def on_epoch_end(self, epoch, logs=None) -> None:
+        self.times.append(time.perf_counter() - self._start)
+
+
+def run_benchmark(
+    model: tf.keras.Model, train_ds, val_ds, class_weights, epochs: int,
+    benchmark_epochs: int = 2,
+) -> None:
+    """Train for a couple of epochs, time each, and extrapolate."""
     random_loss = float(np.log(10))
 
     print("\n" + "=" * 74)
-    print("BENCHMARK: one timed epoch")
+    print(f"BENCHMARK: {benchmark_epochs} timed epochs")
     print("=" * 74)
     print(f"\nA randomly initialised 10-class model has loss ~ln(10) = {random_loss:.3f}.")
-    print("If loss after this epoch is well below that, the model is learning.\n")
+    print("If loss drops well below that, the model is learning.")
+    print("\nEpoch 1 fills the cache (full JPEG decode); epoch 2 reads from it.")
+    print("The epoch-2 time is the steady-state cost to extrapolate from.\n")
 
+    timer = EpochTimer()
     start = time.perf_counter()
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=1,
+        epochs=benchmark_epochs,
         class_weight=class_weights,
+        callbacks=[timer],
         verbose=1,
     )
     elapsed = time.perf_counter() - start
 
-    h = {key: values[0] for key, values in history.history.items()}
+    # Report the LAST epoch's metrics -- the most recent state of the model.
+    h = {key: values[-1] for key, values in history.history.items()}
 
     print("\n" + "=" * 74)
     print("BENCHMARK RESULTS")
     print("=" * 74)
 
-    print(f"\nTime for 1 epoch : {elapsed:.1f} s  ({elapsed / 60:.1f} min)")
-    print(f"Estimated {epochs} epochs: {elapsed * epochs / 60:.0f} min "
-          f"({elapsed * epochs / 3600:.1f} h)")
-    print("  (conservative -- the first epoch includes one-off graph tracing,")
-    print("   so later epochs are typically somewhat faster)")
+    print("\nPer-epoch timings:")
+    for i, t in enumerate(timer.times, start=1):
+        note = " (cache fill -- includes full JPEG decode)" if i == 1 else " (cached)"
+        print(f"  epoch {i}: {t:>7.1f} s  ({t / 60:.1f} min){note}")
 
+    steady = timer.times[-1] if len(timer.times) > 1 else timer.times[0]
+    if len(timer.times) > 1:
+        speedup = timer.times[0] / steady
+        print(f"\nCache speedup: {speedup:.2f}x "
+              f"({timer.times[0]:.0f} s -> {steady:.0f} s per epoch)")
+
+    print(f"\nTotal for {benchmark_epochs} epochs: {elapsed / 60:.1f} min")
+    print(f"Estimated {epochs} epochs: "
+          f"{(timer.times[0] + steady * (epochs - 1)) / 60:.0f} min "
+          f"({(timer.times[0] + steady * (epochs - 1)) / 3600:.1f} h)")
+    print("  (epoch 1 at the uncached rate, the rest at the cached rate)")
+
+    print(f"\nMetrics after epoch {benchmark_epochs}:")
     print(f"\n{'':17}{'loss':>10}{'accuracy':>12}")
     print(f"  {'training':<15}{h['loss']:>10.4f}{h['accuracy']:>12.2%}")
     print(f"  {'validation':<15}{h['val_loss']:>10.4f}{h['val_accuracy']:>12.2%}")
+
+    if benchmark_epochs > 1:
+        print("\nPer-epoch progression (watching the BatchNorm warm-up gap):")
+        for i in range(benchmark_epochs):
+            print(f"  epoch {i + 1}: "
+                  f"train loss {history.history['loss'][i]:.4f} "
+                  f"acc {history.history['accuracy'][i]:.2%}  |  "
+                  f"val loss {history.history['val_loss'][i]:.4f} "
+                  f"acc {history.history['val_accuracy'][i]:.2%}")
 
     print(f"\nSanity check vs random baseline (loss {random_loss:.3f}):")
     if h["loss"] < random_loss * 0.95:
@@ -168,7 +220,12 @@ def run_full_training(model: tf.keras.Model, train_ds, val_ds, class_weights, ep
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
+    timer = EpochTimer()
+    lr_tracker = LearningRateTracker()
+
     callbacks = [
+        timer,
+        lr_tracker,
         # Stop when validation loss stops improving, and rewind to the best
         # weights seen. Without restore_best_weights the model kept is the
         # *last* one -- which by definition is several epochs past its peak.
@@ -176,6 +233,18 @@ def run_full_training(model: tf.keras.Model, train_ds, val_ds, class_weights, ep
             monitor="val_loss",
             patience=EARLY_STOPPING_PATIENCE,
             restore_best_weights=True,
+            verbose=1,
+        ),
+        # Halve the learning rate when validation loss stalls. Patience 3 is
+        # deliberately shorter than EarlyStopping's 5, so the model gets a
+        # chance to escape a plateau with smaller steps BEFORE training is
+        # abandoned. Without that ordering, early stopping would fire first and
+        # the LR reduction would never do anything.
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=REDUCE_LR_PATIENCE,
+            min_lr=1e-6,
             verbose=1,
         ),
         # Independent safety net: write the best model to disk as training goes,
@@ -186,12 +255,11 @@ def run_full_training(model: tf.keras.Model, train_ds, val_ds, class_weights, ep
             save_best_only=True,
             verbose=0,
         ),
-        # Plain-text record of every epoch, for later plotting or comparison.
-        tf.keras.callbacks.CSVLogger(str(MODELS_DIR / "training_log.csv")),
     ]
 
     print(f"\nTraining for up to {epochs} epochs "
-          f"(early stopping on val_loss, patience {EARLY_STOPPING_PATIENCE})...\n")
+          f"(early stopping on val_loss, patience {EARLY_STOPPING_PATIENCE}; "
+          f"LR halved after {REDUCE_LR_PATIENCE} stalled epochs)...\n")
 
     start = time.perf_counter()
     history = model.fit(
@@ -205,26 +273,96 @@ def run_full_training(model: tf.keras.Model, train_ds, val_ds, class_weights, ep
     elapsed = time.perf_counter() - start
 
     model.save(MODELS_DIR / "final_model.keras")
-    with open(MODELS_DIR / "history.json", "w") as fh:
-        json.dump(history.history, fh, indent=2)
-
-    plot_history(history.history)
 
     epochs_run = len(history.history["loss"])
     best_epoch = int(np.argmin(history.history["val_loss"])) + 1
+    early_stopped = epochs_run < epochs
+    lrs = lr_tracker.rates
+    lr_reduced = len(set(round(x, 12) for x in lrs)) > 1
+
+    # Everything an interviewer (or future me) would want, in one small file.
+    record = {
+        "epochs_run": epochs_run,
+        "epochs_max": epochs,
+        "best_epoch": best_epoch,
+        "early_stopped": early_stopped,
+        "lr_reduced": lr_reduced,
+        "total_seconds": round(elapsed, 1),
+        "epoch_seconds": [round(t, 1) for t in timer.times],
+        "learning_rate": lrs,
+        **{key: [float(v) for v in values] for key, values in history.history.items()},
+    }
+    with open(MODELS_DIR / "training_history.json", "w") as fh:
+        json.dump(record, fh, indent=2)
+
+    write_training_log(record)
+    plot_history(history.history)
 
     print("\n" + "=" * 74)
     print("TRAINING COMPLETE")
     print("=" * 74)
-    print(f"Epochs run       : {epochs_run} of {epochs}")
+    print(f"Epochs run       : {epochs_run} of {epochs}"
+          f"{'  (early stopping triggered)' if early_stopped else '  (ran to the cap)'}")
     print(f"Best epoch       : {best_epoch} (lowest validation loss)")
-    print(f"Total time       : {elapsed / 60:.1f} min ({elapsed / epochs_run:.1f} s/epoch)")
+    print(f"Total time       : {elapsed / 60:.1f} min "
+          f"({np.mean(timer.times):.0f} s/epoch average)")
     print(f"Best val loss    : {min(history.history['val_loss']):.4f}")
     print(f"Best val accuracy: {max(history.history['val_accuracy']):.2%}")
+    print(f"Final train loss : {history.history['loss'][-1]:.4f} "
+          f"acc {history.history['accuracy'][-1]:.2%}")
+    print(f"Final val loss   : {history.history['val_loss'][-1]:.4f} "
+          f"acc {history.history['val_accuracy'][-1]:.2%}")
+    print(f"LR reduced       : {'yes' if lr_reduced else 'no'} "
+          f"({lrs[0]:.2e} -> {lrs[-1]:.2e})")
     print(f"\nSaved: {MODELS_DIR / 'best_model.keras'}")
     print(f"       {MODELS_DIR / 'final_model.keras'}")
-    print(f"       {MODELS_DIR / 'training_log.csv'}")
+    print(f"       {MODELS_DIR / 'training_history.json'}")
+    print(f"       {MODELS_DIR / 'training_log.txt'}")
     print(f"       {FIGURES_DIR / 'training_curves.png'}")
+
+
+class LearningRateTracker(tf.keras.callbacks.Callback):
+    """Record the learning rate at the end of every epoch.
+
+    ReduceLROnPlateau changes the optimiser's LR mid-run; without recording it,
+    the history would give no way to see when (or whether) that happened.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rates: list[float] = []
+
+    def on_epoch_end(self, epoch, logs=None) -> None:
+        self.rates.append(float(tf.keras.backend.get_value(self.model.optimizer.learning_rate)))
+
+
+def write_training_log(record: dict) -> None:
+    """Write a human-readable per-epoch table to models/training_log.txt."""
+    lines = [
+        "Crop Disease Detection -- training log",
+        "=" * 78,
+        f"Epochs run: {record['epochs_run']} of {record['epochs_max']}"
+        f"{'  (early stopped)' if record['early_stopped'] else ''}",
+        f"Best epoch: {record['best_epoch']} (lowest val_loss)",
+        f"Total time: {record['total_seconds'] / 60:.1f} min",
+        "",
+        f"{'epoch':>5} {'train_loss':>11} {'train_acc':>10} "
+        f"{'val_loss':>10} {'val_acc':>9} {'lr':>10} {'secs':>7}",
+        "-" * 78,
+    ]
+
+    for i in range(record["epochs_run"]):
+        lines.append(
+            f"{i + 1:>5} "
+            f"{record['loss'][i]:>11.4f} "
+            f"{record['accuracy'][i]:>9.2%} "
+            f"{record['val_loss'][i]:>10.4f} "
+            f"{record['val_accuracy'][i]:>8.2%} "
+            f"{record['learning_rate'][i]:>10.2e} "
+            f"{record['epoch_seconds'][i]:>7.1f}"
+        )
+
+    (MODELS_DIR / "training_log.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def plot_history(history: dict) -> None:
