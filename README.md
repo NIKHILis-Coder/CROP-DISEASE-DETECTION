@@ -337,8 +337,55 @@ each layer is there, parameter count, and training configuration.
 
 ## Results
 
-*Coming soon (Phase 5).* Will cover: test accuracy, confusion matrix,
-per-class precision/recall, and examples the model gets wrong.
+Measured on the **held-out test split** (2,724 images) — data untouched by
+training, early stopping or checkpoint selection. Full analysis in
+[`notebooks/04_evaluation.ipynb`](notebooks/04_evaluation.ipynb); raw numbers in
+[`models/evaluation_metrics.json`](models/evaluation_metrics.json).
+
+| Metric | Value |
+|---|---|
+| **Test accuracy** | **76.76%** |
+| Test loss | 0.7188 |
+| **Macro F1** | **0.7448** |
+| **Weighted F1** | **0.7732** |
+| Majority-class baseline | 29.5% |
+| Lift over baseline | **+47.3 points** |
+
+![Confusion matrix](notebooks/figures/confusion_matrix_normalized.png)
+
+### Per-class
+
+| Class | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| Tomato mosaic virus | 1.00 | 0.84 | **0.91** | 56 |
+| Yellow Leaf Curl Virus | 0.95 | 0.87 | **0.91** | 804 |
+| Leaf mold | 0.84 | 0.82 | 0.83 | 143 |
+| Septoria leaf spot | 0.83 | 0.82 | 0.82 | 265 |
+| Healthy | 1.00 | 0.64 | 0.78 | 238 |
+| Spider mites | 0.86 | 0.65 | 0.74 | 252 |
+| Bacterial spot | 0.54 | 0.99 | 0.70 | 319 |
+| Late blight | 0.74 | 0.66 | 0.70 | 286 |
+| Target spot | 0.98 | 0.38 | 0.55 | 211 |
+| Early blight | 0.39 | 0.70 | **0.50** | 150 |
+
+**Macro-F1 (0.745) is only 0.028 below weighted-F1 (0.773)**, which means
+performance is reasonably even across classes rather than propped up by the
+large ones — the class weighting did its job. Notably the *smallest* class
+(mosaic virus, 373 images total) scores the joint-highest F1.
+
+**Where it struggles.** Bacterial spot behaves as a "sink": 0.99 recall but only
+0.54 precision, meaning the model over-predicts it and pulls in leaves from
+other classes. The mirror image is Target Spot — 0.98 precision but 0.38 recall,
+so when it says Target Spot it is nearly always right, but it misses most of
+them. Early blight and Target Spot confuse each other heavily, which is the
+expected cost of training at 64×64: the fine texture distinguishing them is
+largely destroyed at that resolution.
+
+**Caveat worth stating plainly:** this model was trained for only **5 epochs**
+with validation loss still falling, on 64×64 inputs, after larger configurations
+proved infeasible on the available hardware (see
+[`INTERVIEW_PREP.md`](INTERVIEW_PREP.md)). These numbers are a **floor**, not a
+converged result.
 
 ## Usage
 

@@ -910,3 +910,163 @@ near ln(10) = 2.30 and I would know within nine minutes rather than at the end o
 a long run. Getting 1.176 tells me the whole chain — manifest, split, decode,
 resize, normalise, label mapping, loss function — is wired up correctly. That
 is a lot of things confirmed for very little time.
+
+---
+
+## Phase 5 — Evaluation
+
+### What was built
+
+- **`src/evaluate.py`** — loads `models/best_model.keras`, runs it over the test
+  split, and produces overall metrics, a per-class `classification_report`, both
+  confusion matrices, a grid of the most confident errors, and a machine-readable
+  `models/evaluation_metrics.json`.
+- **`notebooks/04_evaluation.ipynb`** — the same results with commentary on what
+  each one means.
+- **README "Results"** — headline metrics, per-class table, confusion matrix.
+
+### Why the test split and not validation
+
+Validation was used *during* training: `EarlyStopping` watched it,
+`ReduceLROnPlateau` watched it, and `ModelCheckpoint` selected which weights to
+keep based on it. That makes validation performance **optimistically biased** —
+the model was, in a small but real sense, chosen to do well on it.
+
+The test split was carved out in Phase 3, written to CSV, committed, and read by
+nothing until evaluation. That is what makes it an honest estimate. This is also
+why the split had to be persisted rather than recomputed: a reshuffle between
+training and evaluation would have leaked training images into the test set and
+inflated every number below.
+
+### Headline results
+
+| Metric | Value |
+|---|---|
+| Test accuracy | **76.76%** |
+| Test loss | 0.7188 |
+| Macro F1 | **0.7448** |
+| Weighted F1 | **0.7732** |
+| Majority-class baseline | 29.5% |
+| Lift over baseline | **+47.3 points** |
+
+### Macro-F1 vs weighted-F1 — and which matters here
+
+Both average per-class F1 scores; they differ in weighting.
+
+- **Weighted-F1** weights each class by its support, so the big classes dominate
+  and it tracks overall accuracy closely.
+- **Macro-F1** is an unweighted mean — the 56-image mosaic-virus test set counts
+  exactly as much as the 804-image Yellow Leaf Curl set.
+
+**Macro-F1 is the more honest number for an imbalanced dataset**, because a model
+can post a strong weighted-F1 while quietly failing on the rare classes. The gap
+here is **+0.0283** (0.7732 vs 0.7448) — small, which is itself the result:
+performance is fairly even across classes rather than propped up by the large
+ones. Had class weighting been omitted, I would expect that gap to be much wider.
+
+### Best and worst classes — and why
+
+| | Class | F1 | Precision | Recall | Support |
+|---|---|---:|---:|---:|---:|
+| Best | Tomato mosaic virus | **0.913** | 1.00 | 0.84 | 56 |
+| Best | Yellow Leaf Curl Virus | **0.910** | 0.95 | 0.87 | 804 |
+| Worst | Early blight | **0.500** | 0.39 | 0.70 | 150 |
+| Worst | Target Spot | **0.550** | 0.98 | 0.38 | 211 |
+
+**The most interesting result is that mosaic virus — the rarest class, 373 images
+total and only 56 in test — scores the joint-highest F1.** The naive prediction
+was the opposite: the smallest class should suffer most under a 14.4× imbalance.
+Two reasons it did not:
+
+1. **Class weighting worked.** Mosaic virus carried weight 4.87 versus Yellow
+   Leaf Curl's 0.339 — a 14.4× multiplier on its contribution to the loss, which
+   is exactly what stopped it being drowned out.
+2. **It is visually distinctive.** Mosaic virus produces a characteristic yellow
+   mottling unlike any other class here. Distinctiveness matters more than
+   frequency: a rare but unmistakable class is easier than a common but ambiguous
+   one. The correlation between class size and F1 is only **+0.308** — real but
+   weak, which says visual separability explains more of the variance than
+   sample count does.
+
+**The genuine failures are Early blight and Target Spot**, and they fail as a
+*pair*: 24.6% of Target Spot is predicted as Early blight. Both present as brown
+lesions on leaf tissue, distinguished largely by fine texture — concentric rings
+versus a more diffuse spot. **That texture is exactly what 64×64 downsampling
+destroys.** This failure was predicted in Phase 3 when the input size was chosen,
+and it showed up precisely where predicted. It is a resolution problem, not a
+modelling one.
+
+### Reading the confusion matrix
+
+**Bacterial spot is a "sink" class**: recall 0.99 but precision 0.54. It catches
+almost everything genuinely bacterial spot, but also absorbs misclassifications
+from everywhere else — 90 Yellow Leaf Curl images, 52 healthy, 45 Late blight.
+A class with high recall and low precision is one the model retreats to when
+uncertain.
+
+**Target Spot is its exact mirror**: precision 0.98, recall 0.38. When it commits,
+it is almost always right; but it misses 62% of them, mostly to Early blight.
+
+**The costly direction is disease → healthy**, because that means an untreated
+crop. Here the error runs the *safe* way: 21.8% of healthy leaves are called
+Bacterial spot (a false alarm costing an unnecessary inspection), while very
+little flows from disease into healthy. Healthy has **precision 1.00** — the
+model never wrongly declares a diseased leaf healthy in this test set. For a
+diagnostic tool, that is the right asymmetry to have, though here it is a
+fortunate property rather than something explicitly optimised for.
+
+### Likely interview questions
+
+**Q: Your accuracy is 76.76%. Is that good?**
+A: It depends entirely on the baseline, which is why I always quote it. A model
+that ignores the image and always guesses the largest class scores 29.5% on this
+data, so the model is adding about 47 points over guessing. But I would not
+present 76.76% as this architecture's ceiling — the run stopped at a 5-epoch cap
+with validation loss still falling and early stopping never firing, on 64×64
+inputs chosen because larger configurations would not complete on the hardware I
+had. It is a floor produced under a documented constraint. The honest comparison
+class is what published PlantVillage models achieve — high 90s — and the gap is
+explained by input resolution, training length and the absence of transfer
+learning, all of which I can name specifically rather than hand-wave.
+
+**Q: Why report macro-F1 as well as accuracy?**
+A: Because accuracy hides per-class failure when classes are imbalanced. With a
+14.4× imbalance, a model could ignore the rarest classes entirely and still post
+a respectable accuracy — the big classes carry the average. Macro-F1 gives every
+class equal vote, so failure on a rare class actually shows up. Here the two are
+close (0.745 macro vs 0.773 weighted), and that closeness is a *result*: it says
+the class weighting worked and performance is even. If macro-F1 had been, say,
+0.55 against a 0.77 weighted, that gap would be the headline finding, not a
+footnote.
+
+**Q: How do you know you haven't leaked test data into training?**
+A: Four structural guarantees. The split is on file paths and made once, before
+any image is loaded, so one physical image can only land in one split. The split
+is written to CSV and committed, so it cannot be silently regenerated with a
+different shuffle between training and evaluation. `random_state` is fixed. And
+all preprocessing statistics are constants — normalisation is a fixed divide by
+255, not a mean computed from data — so there is no channel through which test
+statistics could influence training. The subtler leak I did guard against is
+*selection* leakage: validation was used for early stopping and checkpoint
+selection, which biases it, so I report on test and not validation.
+
+**Q: The model over-predicts Bacterial spot. What would you do about it?**
+A: First understand it: recall 0.99 with precision 0.54 means Bacterial spot is
+where the model retreats when uncertain, absorbing errors from several other
+classes. Three things I would try, cheapest first. **(1)** Train longer — the run
+hit its epoch cap while still improving, and an undertrained model defaults to
+broad, low-confidence classes. **(2)** Raise the input resolution back to
+128×128; several of the classes bleeding into Bacterial spot are ones whose
+distinguishing features are fine-textured. **(3)** If it persisted after both, I
+would look at the decision threshold rather than the model — for a diagnostic
+tool you might deliberately accept lower precision on a class to protect recall
+elsewhere. What I would *not* do first is add capacity; nothing in the curves
+suggests the model is capacity-limited rather than training-limited.
+
+**Q: Why show the most confident misclassifications rather than a random sample?**
+A: Because they are diagnostic and random ones mostly are not. An error the model
+was 99% sure about points at a systematic confusion — two classes it has genuinely
+conflated, or a mislabelled training image. An error it was 35% sure about is just
+the model saying it does not know, which tells you little you could act on.
+Sorting errors by confidence is a fast way to find the structural problems rather
+than the noise.

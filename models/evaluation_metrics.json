@@ -1,0 +1,319 @@
+{
+  "test_accuracy": 0.7676211453744494,
+  "test_loss": 0.7187691330909729,
+  "macro_f1": 0.7448272143208426,
+  "weighted_f1": 0.7731759206128856,
+  "majority_class_baseline": 0.295,
+  "n_test_images": 2724,
+  "n_classes": 10,
+  "class_names": [
+    "Bacterial_spot",
+    "Early_blight",
+    "Late_blight",
+    "Leaf_Mold",
+    "Septoria_leaf_spot",
+    "Spider_mites Two-spotted_spider_mite",
+    "Target_Spot",
+    "Tomato_Yellow_Leaf_Curl_Virus",
+    "Tomato_mosaic_virus",
+    "healthy"
+  ],
+  "per_class": {
+    "Bacterial_spot": {
+      "precision": 0.5429553264604811,
+      "recall": 0.9905956112852664,
+      "f1": 0.7014428412874584,
+      "support": 319
+    },
+    "Early_blight": {
+      "precision": 0.3888888888888889,
+      "recall": 0.7,
+      "f1": 0.5,
+      "support": 150
+    },
+    "Late_blight": {
+      "precision": 0.7392996108949417,
+      "recall": 0.6643356643356644,
+      "f1": 0.6998158379373849,
+      "support": 286
+    },
+    "Leaf_Mold": {
+      "precision": 0.8357142857142857,
+      "recall": 0.8181818181818182,
+      "f1": 0.8268551236749117,
+      "support": 143
+    },
+    "Septoria_leaf_spot": {
+      "precision": 0.8257575757575758,
+      "recall": 0.8226415094339623,
+      "f1": 0.8241965973534972,
+      "support": 265
+    },
+    "Spider_mites Two-spotted_spider_mite": {
+      "precision": 0.8638743455497382,
+      "recall": 0.6547619047619048,
+      "f1": 0.744920993227991,
+      "support": 252
+    },
+    "Target_Spot": {
+      "precision": 0.9759036144578314,
+      "recall": 0.38388625592417064,
+      "f1": 0.5510204081632653,
+      "support": 211
+    },
+    "Tomato_Yellow_Leaf_Curl_Virus": {
+      "precision": 0.948509485094851,
+      "recall": 0.8706467661691543,
+      "f1": 0.9079118028534371,
+      "support": 804
+    },
+    "Tomato_mosaic_virus": {
+      "precision": 1.0,
+      "recall": 0.8392857142857143,
+      "f1": 0.912621359223301,
+      "support": 56
+    },
+    "healthy": {
+      "precision": 1.0,
+      "recall": 0.6386554621848739,
+      "f1": 0.7794871794871795,
+      "support": 238
+    }
+  },
+  "confusion_matrix": [
+    [
+      316,
+      0,
+      2,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      40,
+      105,
+      2,
+      0,
+      0,
+      1,
+      0,
+      2,
+      0,
+      0
+    ],
+    [
+      45,
+      46,
+      190,
+      2,
+      2,
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      8,
+      4,
+      3,
+      117,
+      7,
+      0,
+      1,
+      3,
+      0,
+      0
+    ],
+    [
+      7,
+      26,
+      10,
+      4,
+      218,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      5,
+      13,
+      24,
+      10,
+      5,
+      165,
+      1,
+      29,
+      0,
+      0
+    ],
+    [
+      19,
+      52,
+      12,
+      0,
+      22,
+      22,
+      81,
+      3,
+      0,
+      0
+    ],
+    [
+      90,
+      0,
+      13,
+      1,
+      0,
+      0,
+      0,
+      700,
+      0,
+      0
+    ],
+    [
+      0,
+      3,
+      0,
+      0,
+      6,
+      0,
+      0,
+      0,
+      47,
+      0
+    ],
+    [
+      52,
+      21,
+      1,
+      6,
+      4,
+      2,
+      0,
+      0,
+      0,
+      152
+    ]
+  ],
+  "top_confusions": [
+    {
+      "true": "Tomato_Yellow_Leaf_Curl_Virus",
+      "predicted": "Bacterial_spot",
+      "count": 90,
+      "fraction_of_true_class": 0.11194029850746269
+    },
+    {
+      "true": "Target_Spot",
+      "predicted": "Early_blight",
+      "count": 52,
+      "fraction_of_true_class": 0.24644549763033174
+    },
+    {
+      "true": "healthy",
+      "predicted": "Bacterial_spot",
+      "count": 52,
+      "fraction_of_true_class": 0.2184873949579832
+    },
+    {
+      "true": "Late_blight",
+      "predicted": "Early_blight",
+      "count": 46,
+      "fraction_of_true_class": 0.16083916083916083
+    },
+    {
+      "true": "Late_blight",
+      "predicted": "Bacterial_spot",
+      "count": 45,
+      "fraction_of_true_class": 0.15734265734265734
+    },
+    {
+      "true": "Early_blight",
+      "predicted": "Bacterial_spot",
+      "count": 40,
+      "fraction_of_true_class": 0.26666666666666666
+    },
+    {
+      "true": "Spider_mites Two-spotted_spider_mite",
+      "predicted": "Tomato_Yellow_Leaf_Curl_Virus",
+      "count": 29,
+      "fraction_of_true_class": 0.11507936507936507
+    },
+    {
+      "true": "Septoria_leaf_spot",
+      "predicted": "Early_blight",
+      "count": 26,
+      "fraction_of_true_class": 0.09811320754716982
+    },
+    {
+      "true": "Spider_mites Two-spotted_spider_mite",
+      "predicted": "Late_blight",
+      "count": 24,
+      "fraction_of_true_class": 0.09523809523809523
+    },
+    {
+      "true": "Target_Spot",
+      "predicted": "Septoria_leaf_spot",
+      "count": 22,
+      "fraction_of_true_class": 0.10426540284360189
+    }
+  ],
+  "most_confident_misclassifications": [
+    {
+      "true": "Tomato_Yellow_Leaf_Curl_Virus",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9995054006576538
+    },
+    {
+      "true": "Tomato_Yellow_Leaf_Curl_Virus",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9990954399108887
+    },
+    {
+      "true": "Leaf_Mold",
+      "predicted": "Septoria_leaf_spot",
+      "confidence": 0.9984973669052124
+    },
+    {
+      "true": "healthy",
+      "predicted": "Early_blight",
+      "confidence": 0.9975946545600891
+    },
+    {
+      "true": "Tomato_Yellow_Leaf_Curl_Virus",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9975141286849976
+    },
+    {
+      "true": "Early_blight",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9974191188812256
+    },
+    {
+      "true": "Early_blight",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9959883093833923
+    },
+    {
+      "true": "Late_blight",
+      "predicted": "Leaf_Mold",
+      "confidence": 0.9956343770027161
+    },
+    {
+      "true": "Tomato_Yellow_Leaf_Curl_Virus",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9954198598861694
+    },
+    {
+      "true": "Early_blight",
+      "predicted": "Bacterial_spot",
+      "confidence": 0.9935939908027649
+    }
+  ]
+}
