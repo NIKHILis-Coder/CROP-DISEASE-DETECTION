@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# .gitignore
+#
+# Git tracks files, not folders. So to keep an *empty* folder visible in the
+# repo we put a tiny placeholder file called `.gitkeep` inside it, then tell
+# Git: "ignore everything in this folder EXCEPT the placeholder".
+#
+# The pattern is always two lines:
+#     some/folder/*        <- ignore all contents
+#     !some/folder/.gitkeep <- but make an exception for this one file
+#
+# The `!` prefix means "un-ignore" (negate the rule above it).
+# ---------------------------------------------------------------------------
+
+# --- Datasets ---------------------------------------------------------------
+# The PlantVillage dataset is ~50k images / >1 GB. Datasets do not belong in
+# Git: the repo would become huge, cloning would be slow, and GitHub rejects
+# files over 100 MB. Anyone can re-download it from Kaggle instead (the
+# download script lives in src/ and the instructions live in the README).
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# --- Trained models ---------------------------------------------------------
+# Keras saves trained weights as .h5 or .keras files, which are large binary
+# blobs. Git stores a full new copy on every change, so committing them would
+# bloat the repo fast. The training script can always regenerate them.
+models/*.h5
+models/*.keras
+
+# --- Python ----------------------------------------------------------------
+# Compiled bytecode caches Python generates automatically. Machine-specific
+# and regenerated on every run, so there is no reason to track them.
+__pycache__/
+*.py[cod]
+
+# --- Virtual environment ----------------------------------------------------
+# The venv holds thousands of installed library files for THIS machine and OS.
+# requirements.txt is the portable way to recreate it anywhere.
+venv/
+.venv/
+
+# --- Secrets ---------------------------------------------------------------
+# .env holds credentials (e.g. Kaggle API keys). Never commit secrets: once
+# pushed to a public repo they must be treated as leaked, even if deleted later.
+.env
+kaggle.json
+
+# --- Notebook checkpoints ---------------------------------------------------
+# Jupyter's autosave folder. Noisy duplicates of the real notebook.
+.ipynb_checkpoints/
+
+# --- OS / editor cruft ------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

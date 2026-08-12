@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# requirements.txt  --  the exact libraries this project needs.
+#
+# Install everything with:   pip install -r requirements.txt
+#
+# Versions use `>=` (a minimum), not `==` (an exact pin). For a portfolio
+# project this keeps installs flexible across machines. Production projects
+# usually pin exact versions so every deploy is byte-for-byte reproducible.
+#
+# NOTE ON PYTHON VERSION: TensorFlow does not publish wheels for Python 3.14
+# yet. Use Python 3.10-3.12 (see the README setup steps).
+# ---------------------------------------------------------------------------
+
+# --- Deep learning ----------------------------------------------------------
+# TensorFlow ships with Keras, the high-level API used to define and train the
+# CNN. Chosen over PyTorch here because Keras' Sequential model is the most
+# readable way to express a small CNN, and its ImageDataGenerator /
+# image_dataset_from_directory helpers read images straight from folders.
+tensorflow>=2.16
+
+# --- Web app ---------------------------------------------------------------
+# Flask serves the image-upload page and returns the model's prediction.
+# Chosen over Django because this app is a couple of routes -- Django's admin,
+# ORM and migrations would all go unused.
+flask>=3.0
+
+# --- Numerical / data handling ---------------------------------------------
+# NumPy: array maths. Images become NumPy arrays of pixel values.
+numpy>=1.26
+# pandas: tables. Used in the EDA notebook to count images per class.
+pandas>=2.2
+
+# --- Plotting --------------------------------------------------------------
+# matplotlib: base plotting library (accuracy/loss curves, sample images).
+matplotlib>=3.8
+# seaborn: sits on top of matplotlib; gives a readable confusion-matrix
+# heatmap in one line instead of ~15 lines of matplotlib.
+seaborn>=0.13
+
+# --- Metrics / evaluation ---------------------------------------------------
+# scikit-learn: confusion_matrix and classification_report (precision, recall,
+# F1). Used only for evaluation, not for training the model.
+scikit-learn>=1.4
+
+# --- Image loading ----------------------------------------------------------
+# Pillow: opens/resizes JPEG and PNG files. Keras and Flask both use it under
+# the hood to turn an uploaded file into pixels.
+pillow>=10.2
+
+# --- Dataset download -------------------------------------------------------
+# Official Kaggle API client -- downloads the PlantVillage dataset from the
+# command line so the process is scripted and repeatable, not a manual click.
+kaggle>=1.6
+
+# --- Notebooks --------------------------------------------------------------
+# Needed to run the exploratory-data-analysis notebook in notebooks/.
+jupyter>=1.0
