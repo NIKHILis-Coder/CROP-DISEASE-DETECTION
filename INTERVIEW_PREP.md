@@ -402,3 +402,241 @@ at 96×96 the fine speckling separating Septoria leaf spot from Target Spot star
 to smear, and no model can learn a feature that is no longer present in its
 input. If accuracy on those two classes turns out to be the weak point in
 Phase 5, raising the input size is one of the first things I would try.
+
+---
+
+## Phase 4 (part 1) — Architecture and benchmark
+
+*Training results follow after the full run; this section covers the design and
+the timed benchmark only.*
+
+### What was built
+
+- **`src/model.py`** — `build_model()` returning the compiled CNN: three
+  Conv→BatchNorm→MaxPool blocks (32/64/128 filters), GlobalAveragePooling,
+  Dense(128) + Dropout(0.5), Dense(10, softmax). **111,946 parameters.**
+- **`src/train.py`** — loads the Phase 3 pipelines, computes inverse-frequency
+  class weights from the training split, and runs either a **one-epoch timed
+  benchmark** (default) or the full run with early stopping (`--full`).
+- **Split manifests committed.** `data/processed/*.csv` is now un-ignored, so the
+  exact split is reproducible from the repository rather than from a seed.
+
+### Architecture
+
+| Layer | Output shape | Params |
+|---|---|---:|
+| Input | (128, 128, 3) | 0 |
+| conv1 — Conv2D(32, 3×3, relu, same) | (128, 128, 32) | 896 |
+| bn1 — BatchNormalization | (128, 128, 32) | 128 |
+| pool1 — MaxPooling2D(2×2) | (64, 64, 32) | 0 |
+| conv2 — Conv2D(64, 3×3, relu, same) | (64, 64, 64) | 18,496 |
+| bn2 — BatchNormalization | (64, 64, 64) | 256 |
+| pool2 — MaxPooling2D(2×2) | (32, 32, 64) | 0 |
+| conv3 — Conv2D(128, 3×3, relu, same) | (32, 32, 128) | 73,856 |
+| bn3 — BatchNormalization | (32, 32, 128) | 512 |
+| pool3 — MaxPooling2D(2×2) | (16, 16, 128) | 0 |
+| gap — GlobalAveragePooling2D | (128) | 0 |
+| dense1 — Dense(128, relu) | (128) | 16,512 |
+| dropout — Dropout(0.5) | (128) | 0 |
+| output — Dense(10, softmax) | (10) | 1,290 |
+| **Total** | | **111,946** |
+
+Trainable 111,498 · non-trainable 448 (BatchNorm moving averages).
+
+### Why — design decisions
+
+**Why three conv blocks, not two or five?**
+Each block halves the spatial size: 128 → 64 → 32 → 16. Three blocks land on a
+16×16 map, which is the sweet spot — small enough that global pooling summarises
+it meaningfully, large enough that spatial information has not been thrown away.
+Two blocks would stop at 32×32 with only 64 filters, leaving the deepest features
+still fairly local — they would describe textures, not lesion-scale structure.
+Five blocks would take it to 4×4, which for 128×128 inputs starts discarding
+detail, and would add parameters to a model that already has to be regularised
+hard against 12,712 training images. Depth is also not free here: the benchmark
+says 8.6 minutes per epoch on CPU, and a fourth block would add meaningfully to
+that. Three is the point where the receptive field covers a useful fraction of
+the leaf without either wasting compute or overfitting.
+
+**Why 32 → 64 → 128 filters?**
+Doubling the filter count each time the spatial size halves is the standard CNN
+trade-off, and it is a genuine trade rather than a convention. Early layers see
+small patches and only need a few kinds of pattern — edges, colour transitions —
+so 32 filters suffice. Deeper layers see larger regions, and the number of
+*distinct* things a large region can contain is much greater, so more filters are
+needed to describe them. Doubling filters while quartering the pixel count also
+keeps the computational cost per block roughly balanced rather than
+front-loading or back-loading the network. Starting at 32 rather than 64 halves
+the cost of the most expensive layer — conv1 runs at full 128×128 resolution.
+
+**Why GlobalAveragePooling2D instead of Flatten?**
+This is the single highest-leverage choice in the architecture. The final feature
+map is 16×16×128. `Flatten` would produce a 32,768-element vector, and connecting
+that to `Dense(128)` costs **32,768 × 128 ≈ 4.2 million parameters** — turning a
+112k-parameter model into a 4.3M-parameter one, where **97% of the weights sit in
+a single layer**. With 12,712 training images that layer would overfit almost
+immediately; it has enough capacity to memorise the training set outright.
+
+`GlobalAveragePooling2D` instead averages each of the 128 feature maps down to
+one number, giving a 128-element vector and a 16,512-parameter dense layer — a
+**254× reduction**. It also gives something Flatten cannot: translation
+invariance. The average of a feature map does not depend on *where* in the leaf
+the feature appeared, which is exactly right here, because a lesion in the top
+left and the same lesion in the bottom right mean the same diagnosis. Flatten
+would force the model to learn that equivalence from data instead.
+
+**Why BatchNorm after each Conv?**
+As a network trains, the distribution of each layer's inputs keeps shifting
+because the layers below it are still changing. BatchNorm renormalises each
+batch's activations back to a stable scale, which (a) lets training use a higher
+learning rate without diverging, (b) speeds up convergence — worth a lot when an
+epoch costs 8.6 minutes — and (c) provides a mild regularising effect, since each
+example's normalisation depends on the other examples in its batch.
+
+Worth knowing for follow-up questions: I placed BatchNorm *after* the ReLU
+activation (`Conv(relu) → BN → Pool`). The original paper puts it *before* the
+activation (`Conv → BN → ReLU`), and that ordering is marginally more common in
+modern code. In practice the difference is small and empirically contested; the
+important thing is to know that both exist and that the choice is deliberate.
+
+**Why Dropout 0.5 on the dense layer only, and not after the conv layers?**
+Dropout randomly zeroes units during training so the model cannot lean on any
+single feature. It belongs where the parameters are, and after global pooling the
+dense layers hold 16,512 + 1,290 of the weights in the most overfit-prone part of
+the network. 0.5 is the rate the original Dropout paper recommends for fully
+connected layers and is a sensible default.
+
+Conv layers are a different case. They already have far fewer parameters
+(weight sharing means one 3×3 filter is 9 weights regardless of image size), and
+they are already regularised by BatchNorm, by pooling, and by the input
+augmentation from Phase 3. Dropping random pixels from a feature map is also less
+effective than it sounds, because neighbouring pixels are highly correlated — the
+dropped information is usually still present next door. If the model still
+overfits, `SpatialDropout2D` (which drops entire feature maps) is the right tool,
+not plain Dropout.
+
+**Why `class_weight` rather than oversampling or focal loss?**
+All three address the 14.4× imbalance; they differ in cost and side-effects.
+
+- **`class_weight` (chosen)** multiplies each example's contribution to the loss
+  by its class weight, so every *class* contributes roughly equally rather than
+  every *image*. It costs nothing — no extra data, no change to epoch time — and
+  it is a single argument to `fit()`, so it is trivial to ablate: run with and
+  without, compare. That matters when each experiment costs 8.6 min/epoch.
+- **Oversampling** duplicates rare-class images. The 373-image mosaic-virus class
+  would need ~14× duplication, and the model then sees the *same* 373 images over
+  and over, which invites memorising them specifically. It also lengthens every
+  epoch by inflating the dataset.
+- **Focal loss** down-weights easy examples to focus on hard ones. It is designed
+  for extreme imbalance (object detection, where background outnumbers objects
+  ~1000:1) and introduces a second hyperparameter, γ, to tune. At 14.4× it is
+  reaching for a heavier tool than the problem needs.
+
+The honest framing: at moderate imbalance, class weighting gets most of the
+benefit for none of the cost. If Phase 5's confusion matrix shows mosaic virus
+still failing, focal loss or targeted data collection become worth the extra
+complexity.
+
+Computed weights (from the training split only, so nothing leaks from val/test):
+
+| Class | Train images | Share | Weight |
+|---|---:|---:|---:|
+| Tomato Yellow Leaf Curl Virus | 3,750 | 29.5% | **0.339** |
+| Bacterial spot | 1,489 | 11.7% | 0.854 |
+| Late blight | 1,336 | 10.5% | 0.951 |
+| Septoria leaf spot | 1,240 | 9.8% | 1.025 |
+| Spider mites (two-spotted) | 1,173 | 9.2% | 1.084 |
+| Healthy | 1,114 | 8.8% | 1.141 |
+| Target spot | 983 | 7.7% | 1.293 |
+| Early blight | 700 | 5.5% | 1.816 |
+| Leaf mold | 666 | 5.2% | 1.909 |
+| Tomato mosaic virus | 261 | 2.1% | **4.870** |
+
+Weight ratio 0.339 → 4.870 = **14.4×**, exactly mirroring the class imbalance,
+which is the arithmetic working as intended: `weight = n_samples / (n_classes ×
+class_count)`, so a class holding exactly 1/10th of the data gets weight 1.0.
+
+**Why early-stop on `val_loss` rather than `val_accuracy`?**
+Because with a 14.4× imbalance, accuracy is a blunt instrument. A model can raise
+accuracy simply by getting better at Yellow Leaf Curl Virus — 29.5% of the data —
+while getting *worse* at mosaic virus at 2.1%. Accuracy would go up and the model
+would be worse at the thing that is hard.
+
+Loss is more sensitive in two ways that matter here. It is computed on the
+predicted *probabilities*, not just the arg-max, so it registers a model becoming
+less confident about correct answers — a genuine early warning of overfitting
+that accuracy is blind to, because the arg-max does not change until confidence
+has already collapsed. And because `class_weight` is applied to the loss, the
+monitored quantity is the *class-balanced* loss, which is exactly the objective
+being optimised. Accuracy is also a step function of the arg-max, so it moves in
+discrete jumps and plateaus — poor signal for a patience-based rule, which needs
+to detect small consistent degradation.
+
+### Benchmark results (one timed epoch)
+
+| Measurement | Value |
+|---|---|
+| Time for 1 epoch | **514 s (8.6 min)** — 398 steps at ~1.3 s/step |
+| Estimated 30 epochs | **~4.3 hours** (conservative — epoch 1 includes graph tracing) |
+| Training loss / accuracy | **1.176 / 61.21%** |
+| Validation loss / accuracy | **3.794 / 23.94%** |
+| Random-guess loss, ln(10) | 2.303 |
+| Majority-class baseline | 29.5% |
+
+**Reading these numbers.** Training loss of 1.176 against a random baseline of
+2.303, with 61% training accuracy after a single pass, says the model is learning
+real structure — this is the check the benchmark exists for.
+
+The validation numbers are *worse* than random-ish, and that is worth explaining
+rather than glossing over. Validation loss (3.79) far above training loss (1.18)
+after one epoch is the classic **BatchNorm warm-up** signature. During training,
+BatchNorm normalises using each batch's own statistics; at inference it uses
+moving averages accumulated across training. After one epoch those averages have
+only had 398 updates at momentum 0.99 and are still far from the true
+activation statistics, so the model behaves quite differently in inference mode
+than in training mode. This typically resolves within a few epochs as the moving
+averages converge. It is a known artefact of measuring after exactly one epoch,
+not evidence that the architecture is broken — but the way to *confirm* that is
+the full run, not assertion.
+
+### Likely interview questions
+
+**Q: Your model has 112k parameters. Isn't that far too small to be useful?**
+A: It is small deliberately, and the constraint that sets the size is the data,
+not the ambition. There are 12,712 training images; a model with millions of free
+parameters can memorise that outright, and the validation curve would diverge
+from training within a few epochs. The parameter count is also where the
+GlobalAveragePooling choice pays off — swapping it for Flatten would take the
+model from 112k to 4.3M parameters, with 97% of them in one dense layer, purely
+to preserve spatial position information the task does not need. Small also means
+fast: 8.6 minutes per epoch on CPU, so the whole run fits in an afternoon and I
+can afford to try things. If the model turns out to *underfit* — training accuracy
+plateauing well below what the task allows — then adding capacity is the right
+response, and I would add a fourth conv block before I would touch the dense head.
+
+**Q: You measured validation loss of 3.79 after one epoch, far worse than
+training loss of 1.18. Isn't that overfitting already?**
+A: It is very unlikely to be overfitting after a single pass through the data —
+a 112k-parameter model has not had the opportunity to memorise 12,712 images in
+398 gradient steps. The much more probable cause is BatchNorm's train/inference
+mismatch. In training mode BatchNorm normalises using the current batch's mean
+and variance; in inference mode it uses moving averages accumulated during
+training, which after one epoch are still poorly estimated. So the training
+number is measured with good statistics and the validation number with bad ones,
+and they are not yet comparable. The distinguishing test is simply to keep
+training: BatchNorm warm-up closes over the next few epochs, whereas genuine
+overfitting shows validation loss *rising* while training loss keeps falling,
+after both have first come down together. If the gap persisted past five or six
+epochs I would suspect something structural — and I would check the augmentation
+was not accidentally applied to validation, which Phase 3 already tests for.
+
+**Q: Why run a one-epoch benchmark at all instead of just training?**
+A: Two reasons, and the second is the one people underrate. First, it converts an
+unknown into a number: 8.6 minutes per epoch means 30 epochs is 4.3 hours, which
+is a decision I can now make deliberately instead of discovering three hours in.
+Second, it is the cheapest possible smoke test for a broken pipeline. If labels
+were misaligned or the learning rate were wildly wrong, training loss would sit
+near ln(10) = 2.30 and I would know within nine minutes rather than at the end of
+a long run. Getting 1.176 tells me the whole chain — manifest, split, decode,
+resize, normalise, label mapping, loss function — is wired up correctly. That
+is a lot of things confirmed for very little time.

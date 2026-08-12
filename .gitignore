@@ -22,6 +22,14 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
+# ...but DO track the split manifests. These are small CSVs of file paths and
+# labels (no image data), and committing them makes the exact train/val/test
+# split reproducible from the repo alone rather than depending on a seed
+# producing the same result on someone else's machine. The split must never
+# change once a model has been evaluated against it, so it belongs in version
+# control like any other fixed experimental condition.
+!data/processed/*.csv
+
 # --- Trained models ---------------------------------------------------------
 # Keras saves trained weights as .h5 or .keras files, which are large binary
 # blobs. Git stores a full new copy on every change, so committing them would
