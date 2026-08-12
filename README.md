@@ -8,8 +8,8 @@ built from scratch with TensorFlow/Keras and trained on the
 [PlantVillage](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
 dataset from Kaggle. It is served through a lightweight **Flask** web app.
 
-> **Status:** Phase 1 of 7 complete — project scaffolding. Later phases add the
-> dataset, preprocessing, the trained model, evaluation and the web app.
+> **Status:** Phase 2 of 7 complete — dataset acquired and explored. Later
+> phases add preprocessing, the trained model, evaluation and the web app.
 > Sections marked *Coming soon* below get filled in as those phases land.
 
 ### Why this project?
@@ -86,8 +86,11 @@ CROP-DISEASE-DETECTION/
 │   └── processed/         # Resized / split images ready for training
 │
 ├── notebooks/             # Jupyter notebooks for exploration and experiments
+│   ├── 01_eda.ipynb       # Exploratory data analysis of the tomato subset
+│   └── figures/           # Plots saved by the notebooks (embedded in this README)
 │
 ├── src/                   # Reusable Python code (download, preprocess, train, evaluate)
+│   └── download_data.py   # Fetches PlantVillage and extracts the tomato classes
 │
 ├── models/                # Saved trained models (.keras / .h5 — ignored by Git)
 │
@@ -115,8 +118,83 @@ repeated, and any preprocessing bug can be traced back to a pristine source.
 
 ## Dataset
 
-*Coming soon (Phase 2).* Will cover: source and licence, number of images,
-number of classes, class distribution, and image size statistics.
+**Source:** the [PlantVillage dataset](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
+on Kaggle — 54,305 lab photographs of healthy and diseased leaves covering 38
+classes across 14 crops, released for public research use.
+
+**Scope used here:** the **tomato subset only** — **18,160 colour images across
+10 classes** (nine diseases plus healthy). Download and extraction are scripted
+in [`src/download_data.py`](src/download_data.py); the full exploration lives in
+[`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb).
+
+| Class | Images | Share |
+|-------|-------:|------:|
+| Tomato Yellow Leaf Curl Virus | 5,357 | 29.5% |
+| Bacterial spot | 2,127 | 11.7% |
+| Late blight | 1,909 | 10.5% |
+| Septoria leaf spot | 1,771 | 9.8% |
+| Spider mites (two-spotted) | 1,676 | 9.2% |
+| Healthy | 1,591 | 8.8% |
+| Target spot | 1,404 | 7.7% |
+| Early blight | 1,000 | 5.5% |
+| Leaf mold | 952 | 5.2% |
+| Tomato mosaic virus | 373 | 2.1% |
+| **Total** | **18,160** | **100%** |
+
+![Class distribution](notebooks/figures/class_distribution.png)
+
+### Why subset to tomato?
+
+**Training time.** The model here is a small CNN trained **from scratch on a
+CPU** — no pre-trained weights, no GPU. Cutting the data from 54k images to 18k
+cuts every training epoch to roughly a third, which is the difference between
+iterating on the architecture several times an evening and waiting overnight per
+run. Fast iteration matters more than raw scale for a project whose point is to
+demonstrate the pipeline end to end.
+
+**A sharper, more honest problem.** All 10 classes are the same crop, so the
+model must separate *diseases of tomato* rather than the much easier task of
+telling an apple leaf from a grape leaf. Distinguishing early blight from late
+blight is genuinely hard and visually subtle; distinguishing corn from tomato is
+not. A high score on the tomato subset therefore means considerably more than
+the same score across all 38 classes.
+
+**Tomato is the natural choice** for the subset: it is the single best-
+represented crop in PlantVillage, with the widest range of diseases, so it gives
+10 classes without any of them being uselessly small.
+
+### What the data looks like
+
+![Sample images](notebooks/figures/sample_images.png)
+
+**Key findings from the EDA:**
+
+- **Perfectly uniform format.** Every one of the 18,160 images is **256×256 RGB
+  JPEG** — 100% square, a single aspect ratio. Resizing for the CNN is therefore
+  a clean downscale with no distortion or cropping decisions.
+- **Zero corrupt files.** All 18,160 passed a `PIL.Image.verify()` integrity
+  check, so the data loader needs no error handling for unreadable images.
+- **Moderate class imbalance — 14.4×** between the largest class (Yellow Leaf
+  Curl Virus, 5,357) and the smallest (Tomato mosaic virus, 373). This sets the
+  **majority-class baseline at 29.5%**: a model that ignores the image entirely
+  and always guesses the biggest class would score that. Any reported accuracy
+  has to be read against that number.
+- **Consequences for later phases:** the train/val/test split must be
+  **stratified** so rare classes appear in every split, and evaluation must
+  report a **confusion matrix and per-class recall**, not accuracy alone.
+
+**Known limitation:** PlantVillage images are laboratory photographs of single
+detached leaves on plain backgrounds. A model trained on them will not
+automatically work on a phone photo taken in a field, where soil, sky and
+overlapping foliage fill the frame. This *domain gap* is the honest caveat about
+the finished app.
+
+### Reproducing the dataset locally
+
+```bash
+python src/download_data.py               # download + extract the tomato subset
+python src/download_data.py --delete-zip  # ...and remove the 2 GB archive after
+```
 
 ## Model
 
@@ -140,7 +218,7 @@ to classify your own leaf photo.
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | 1 | Project structure, dependencies, README | ✅ Done |
-| 2 | Dataset download + exploratory data analysis | ⬜ Not started |
+| 2 | Dataset download + exploratory data analysis | ✅ Done |
 | 3 | Preprocessing and augmentation pipeline | ⬜ Not started |
 | 4 | Build and train the CNN | ⬜ Not started |
 | 5 | Evaluation: accuracy, confusion matrix, error analysis | ⬜ Not started |
