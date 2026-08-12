@@ -67,20 +67,34 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 # a stale cache would silently keep serving the old data.
 CACHE_DIR = PROCESSED_DIR / "cache"
 
-# Cache backend: "disk" or "memory".
-#
-# Caching stores the decoded, resized images so that JPEG decoding happens once
-# on the first epoch instead of on every epoch. That is the single biggest
-# speedup available here, because decoding 12,712 JPEGs per epoch is pure
-# repeated work -- the pixels never change.
-#
-# We default to DISK rather than memory because this machine has ~7.3 GB of RAM
-# with well under 1 GB genuinely available, while the training cache alone needs
-# ~600 MB and validation another ~500 MB. An in-memory cache that does not fit
-# gets paged out by the OS, which is a disk cache with extra copying -- strictly
-# worse than asking tf.data to use the disk deliberately. On a machine with
-# RAM to spare, "memory" is faster; set CACHE_BACKEND accordingly.
+# Cache backend: "disk" or "memory". Only consulted when caching is enabled,
+# which by default it is NOT -- see CACHE_ENABLED below.
 CACHE_BACKEND = "disk"
+
+# Caching is OFF by default, for two independently sufficient reasons:
+#
+#   1. It did not help. Profiling measured 504 s for the cache-filling epoch and
+#      518.8 s for the cached epoch -- a 0.97x "speedup". The workload is
+#      compute-bound (~165M MACs per image forward, ~6.3 TMACs per epoch on a
+#      6-core Ryzen 5 5500U), and the AUTOTUNE + prefetch pipeline was already
+#      hiding JPEG decode behind that arithmetic.
+#
+#   2. It was actively harmful. Caching requires moving `shuffle` after the
+#      decode step (otherwise the cache freezes one fixed ordering forever),
+#      which silently changed the shuffle buffer from ~1 MB of file paths to
+#      ~596 MB of decoded images. That paged this machine into the ground.
+#
+# The code is kept because it is correct and verified bit-identical to the
+# uncached path -- pass cache=True to load_splits() on a machine with RAM to
+# spare and slower storage, where it may genuinely pay off.
+CACHE_ENABLED = False
+
+# Upper bound on the tf.data shuffle buffer, in images.
+#
+# 2,048 decoded uint8 images at 128x128x3 is ~94 MB -- a memory cost that stays
+# predictable regardless of dataset size. Deliberately NOT len(dataset): the
+# shuffle sits after decoding, so the buffer holds pixels rather than paths.
+SHUFFLE_BUFFER_SIZE = 2048
 
 # 128x128 is the compromise between detail and CPU training time.
 #
@@ -312,10 +326,25 @@ def make_dataset(
     ds = _apply_cache(ds, cache_name)
 
     if shuffle:
-        # A buffer as large as the split means a true full shuffle. Reshuffling
-        # every epoch means batches differ run to run, which helps the model
-        # generalise rather than memorise batch composition.
-        ds = ds.shuffle(len(paths), seed=SEED, reshuffle_each_iteration=True)
+        # Buffer sized to bound memory (~94 MB of decoded uint8 images), NOT to
+        # the full dataset.
+        #
+        # This matters because the shuffle sits AFTER the decode step, so the
+        # buffer holds decoded images, not file paths. A full-dataset buffer
+        # would be 12,712 x 128x128x3 = ~596 MB -- which on this machine caused
+        # heavy pagefile thrashing and collapsed training throughput about 5x.
+        # See INTERVIEW_PREP.md "The paging incident" for the full story.
+        #
+        # A partial buffer is sufficient here because the underlying order is
+        # already randomised: the stratified split shuffled the manifest rows,
+        # so consecutive elements are not class-ordered to begin with. The
+        # buffer only needs to add per-epoch variation on top of that, and
+        # reshuffle_each_iteration=True ensures every epoch differs.
+        ds = ds.shuffle(
+            buffer_size=min(SHUFFLE_BUFFER_SIZE, len(paths)),
+            seed=SEED,
+            reshuffle_each_iteration=True,
+        )
 
     ds = ds.batch(batch_size)
 
@@ -435,7 +464,7 @@ def load_splits(
     *,
     batch_size: int = BATCH_SIZE,
     augment_train: bool = True,
-    cache: bool = True,
+    cache: bool = CACHE_ENABLED,
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset, list[str]]:
     """Build the train/val/test pipelines in one call.
 
@@ -447,9 +476,9 @@ def load_splits(
     will ever submit, and would make scores wobble run to run as the random
     distortions changed.
 
-    `cache=True` decodes and resizes each image once and reuses the result on
-    every later epoch. The first epoch is no faster (it does the work and fills
-    the cache); every epoch after it skips JPEG decoding entirely.
+    `cache` defaults to OFF. Profiling showed it gives no speedup on this
+    hardware (0.97x) and its required pipeline reordering inflated the shuffle
+    buffer 600-fold; see CACHE_ENABLED above.
     """
     splits = load_split_manifests()
 

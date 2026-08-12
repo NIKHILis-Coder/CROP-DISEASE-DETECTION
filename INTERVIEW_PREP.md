@@ -732,6 +732,101 @@ a GPU, where this model would train in minutes. None of those are free, which is
 the point — the cache looked free, and that is precisely why it was worth
 measuring rather than assuming.
 
+### The paging incident — how the cache went from useless to harmful
+
+The cache did not merely fail to help. It **broke the next training run**, and
+the mechanism is the most instructive thing in this project.
+
+**What happened.** The 30-epoch run was launched expecting ~4.3 hours. After
+**5 hours 21 minutes it had completed roughly 11 of 30 epochs** and was still
+slowing down. It was killed deliberately; the projected remaining time had grown
+past 10 hours.
+
+**The trigger: a buffer that changed size without changing its code.** Caching
+requires `shuffle` to move *after* the cache — otherwise `cache()` records one
+fixed ordering and replays it every epoch, silently destroying the shuffle. That
+reordering was correct and necessary. What it also did was change what the
+shuffle buffer *contains*:
+
+| | Position | Buffer holds | Size |
+|---|---|---|---|
+| Phase 3 (uncached) | shuffle **before** decode | 12,712 file path strings | **~1 MB** |
+| Phase 4 (cached) | shuffle **after** decode | 12,712 decoded images | **~596 MB** |
+
+The line `ds.shuffle(len(paths), ...)` was never edited. Its memory footprint
+grew **600-fold** purely because of what now sat above it in the pipeline. I had
+sized the *cache* carefully against available RAM (596 MB train + 511 MB val)
+and completely failed to re-examine the buffer that the same edit had inflated.
+
+**How it manifested.** Not as a crash or an error — as a slow strangulation.
+Measuring CPU-seconds consumed per wall-second (how many cores' worth of work
+the process was actually getting on a 6-core/12-thread CPU):
+
+| Window | CPU-s total | Parallelism |
+|---|---:|---|
+| 0 → 11 min | 4,679 | **7.36×** (healthy) |
+| 11 → 126 min | 15,191 | 1.52× |
+| 126 → 144 min | 22,586 | 6.73× (brief recovery) |
+| 144 → 310 min | 37,641 | **1.51×** |
+
+At the kill: **2,679 MB of process pagefile usage**, ~1,066 MB system RAM
+available, sustained non-zero `Pages/sec`. CPU-seconds *per epoch* stayed roughly
+constant at ~3,700 — the work never changed, the machine simply could not deliver
+it. The process was waiting on disk, not computing.
+
+**Why the benchmark missed it.** The 2-epoch benchmark reported 504.0 s and
+518.8 s per epoch, consistent with the 514 s uncached baseline. It looked clean.
+Two reasons it was blind:
+
+1. **Too short.** Degradation was progressive, not immediate. Two epochs never
+   let memory pressure compound.
+2. **Different conditions.** Available RAM on a 7.3 GB laptop varies with
+   whatever else is open. The benchmark ran when the buffer still fit; the
+   overnight run did not.
+
+**What was recovered.** `ModelCheckpoint(save_best_only=True)` had been writing
+throughout, so the best weights survived: **val_loss 0.3485, val_accuracy
+87.67%** (evaluated after the fact), against a 29.5% majority baseline. The model
+was training *well*. The failure was infrastructure throughput, not architecture,
+data, or optimisation — an important distinction, because the two look identical
+from a stalled progress bar.
+
+**What was lost.** `training_history.json` and `training_log.txt` are written
+when `fit()` returns, so the per-epoch history died with the process. The lesson
+is to stream metrics to disk per epoch (a `CSVLogger`-style callback) rather than
+serialising everything at the end — checkpoints survived precisely because they
+were written incrementally.
+
+**The fix.**
+
+1. **Bound the shuffle buffer explicitly** at 2,048 images (~94 MB) rather than
+   `len(dataset)`. Sufficient because the stratified split already randomised the
+   manifest order, so the buffer only needs to add per-epoch variation on top of
+   an already-shuffled base — not perform the whole shuffle itself.
+2. **Disable the cache by default.** Two independent reasons, either sufficient
+   alone: it delivered 0.97× (no benefit), and it was the change that forced the
+   shuffle reordering in the first place.
+
+**The general lesson — the one worth carrying to any pipeline.** *Reordering
+operations in a data pipeline silently changes the memory footprint of the
+operations around them.* Every stage's cost depends on what it receives, and
+moving one stage rewrites the inputs of its neighbours. A code review of that
+diff would show `shuffle` moving three lines down and conclude "ordering fix,
+no behaviour change" — while the actual change was a 600× memory increase in a
+line nobody touched.
+
+Two corollaries:
+
+- **Benchmarks must run long enough for the failure mode you have not thought
+  of.** A 2-epoch benchmark measures steady-state compute. It cannot measure
+  resource exhaustion, which is by definition cumulative. If a run is going to
+  last hours, some part of the validation has to last long enough for pressure to
+  build.
+- **Watch the resource, not just the clock.** Wall-time per epoch told me nothing
+  until it was hours too late. CPU-seconds per wall-second identified the problem
+  immediately and unambiguously: a compute-bound process getting 1.5 cores out of
+  6 is not slow, it is *blocked*.
+
 **Q: Why run a one-epoch benchmark at all instead of just training?**
 A: Two reasons, and the second is the one people underrate. First, it converts an
 unknown into a number: 8.6 minutes per epoch means 30 epochs is 4.3 hours, which

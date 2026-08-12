@@ -1,0 +1,117 @@
+ABORTED TRAINING RUN -- INCIDENT SUMMARY
+========================================================================
+Run started : 2026-08-12 18:45:18
+Run killed  : 2026-08-13 00:06:30
+Wall clock  : 321.2 minutes (5 h 21 min)
+Outcome     : TERMINATED before completion. Superseded by a clean re-run.
+
+WHAT HAPPENED
+------------------------------------------------------------------------
+A 30-epoch training run was launched after a 2-epoch benchmark measured
+~8.6 min/epoch, implying ~4.3 hours total. Instead, after 5 h 21 min only
+an estimated 11 of 30 epochs had completed. The process was not hung --
+it was swapping. Training throughput collapsed to roughly a fifth of its
+starting rate and kept degrading.
+
+The run was killed deliberately rather than left to finish, because the
+projected remaining time had grown to 10+ hours and would have continued
+to worsen as memory pressure compounded.
+
+ROOT CAUSE
+------------------------------------------------------------------------
+An oversized tf.data shuffle buffer, introduced as a side effect of
+adding a cache to the input pipeline.
+
+Caching requires `shuffle` to be placed AFTER the cache -- otherwise the
+cache records one fixed ordering and replays it every epoch, silently
+destroying the shuffle. That reordering was correct. What it also did,
+unnoticed, was change what the shuffle buffer holds:
+
+    BEFORE (Phase 3, uncached):  shuffle ran before decode
+                                 -> buffered 12,712 file path STRINGS
+                                 -> approx 1 MB
+
+    AFTER  (Phase 4, cached):    shuffle ran after decode
+                                 -> buffered 12,712 decoded IMAGES
+                                 -> 12,712 x 128 x 128 x 3 = approx 596 MB
+
+The cache size itself was carefully sized against available RAM. The
+shuffle buffer, inflated ~600x by the same edit, was not re-examined.
+
+WHY THE BENCHMARK DID NOT CATCH IT
+------------------------------------------------------------------------
+The 2-epoch benchmark reported 504.0 s and 518.8 s per epoch -- entirely
+consistent with the earlier uncached measurement of 514 s, so it looked
+clean. Two reasons it missed the problem:
+
+  * Too short. Two epochs is not long enough for memory pressure to
+    compound. Degradation was progressive, not immediate.
+  * More RAM was free at benchmark time. The machine has 7.3 GB total;
+    available RAM varies with whatever else is open. The benchmark ran
+    when the buffer still fit; the long run did not.
+
+HOW IT MANIFESTED
+------------------------------------------------------------------------
+Measured as CPU-seconds consumed per wall-second (i.e. how many cores'
+worth of work the process was actually getting on a 6-core / 12-thread
+CPU):
+
+    elapsed        CPU-s      parallelism in window
+    -----------------------------------------------
+      0 ->  11 min    4,679    7.36x   (healthy)
+     11 -> 126 min   15,191    1.52x   (degraded)
+    126 -> 144 min   22,586    6.73x   (brief recovery)
+    144 -> 310 min   37,641    1.51x   (degraded)
+
+    Process pagefile usage at kill : 2,679 MB
+    Available system RAM at kill   : ~1,066 MB
+    Memory Pages/sec               : sustained non-zero
+
+A process that is computing shows high parallelism. A process that is
+waiting on the pagefile does not. The CPU-seconds per epoch stayed
+roughly constant (~3,700) -- the work was unchanged; the machine simply
+could not deliver it.
+
+WHAT WAS RECOVERED
+------------------------------------------------------------------------
+ModelCheckpoint(save_best_only=True) had been writing throughout, so the
+best weights survived the kill. Preserved as:
+
+    models/aborted_run_best_model.keras   (1.34 MB, 111,946 params)
+
+Evaluated after the fact on the validation split:
+
+    val_loss     : 0.3485
+    val_accuracy : 0.8767  (87.67%)
+
+Last checkpoint write: 2026-08-12 21:27:22, i.e. the last epoch at which
+validation loss improved -- approximately epoch 8-9 of the estimated 11
+completed.
+
+Worth noting: the model itself was training well. 87.67% validation
+accuracy against a 29.5% majority-class baseline, with no sign of
+instability. The failure was purely one of infrastructure throughput, not
+of the architecture, the data, or the optimisation.
+
+WHAT WAS LOST
+------------------------------------------------------------------------
+training_history.json and training_log.txt are written when fit() returns,
+so killing the process lost the per-epoch history. Only the checkpoint and
+the external monitoring samples above survived. A future run would be
+better served by a per-epoch callback that appends to disk as it goes,
+rather than one that writes everything at the end.
+
+RESOLUTION
+------------------------------------------------------------------------
+  1. Shuffle buffer bounded explicitly at 2,048 images (~94 MB) instead of
+     the full dataset. Sufficient because the stratified split already
+     randomised the manifest order, so the buffer only needs to add
+     per-epoch variation on top.
+  2. Caching disabled by default. Two independent reasons: it delivered a
+     0.97x "speedup" (no benefit -- the workload is compute-bound), and it
+     was the change that forced the shuffle reordering in the first place.
+  3. Re-run capped at 15 epochs rather than 30, with active monitoring of
+     available RAM, pagefile size and CPU parallelism.
+
+This checkpoint is retained for reference only. It is NOT the model used
+for evaluation; the clean re-run produces the definitive model.
