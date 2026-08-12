@@ -241,3 +241,164 @@ pipeline works; it does not prove field readiness. Closing that gap would need
 either field-collected images or aggressive augmentation (random backgrounds,
 lighting and scale) — and honestly reporting the limitation matters more than
 hiding it behind a good number.
+
+---
+
+## Phase 3 — Preprocessing and augmentation pipeline
+
+### What was built
+
+- **`src/data_loader.py`** — the full path from folders of JPEGs to batched
+  tensors: manifest building, stratified 70/15/15 splitting, persisted split
+  CSVs, `tf.data` pipelines (decode → resize 128×128 → scale to [0,1]), and
+  Keras augmentation layers applied to training data only.
+- **`notebooks/02_pipeline_check.ipynb`** — six explicit PASS/FAIL checks run
+  before any training, covering shape, pixel range, label alignment,
+  stratification, augmentation behaviour, and val/test purity.
+- **README "Preprocessing" section** documenting each choice.
+
+### Why — design decisions
+
+**Why in-graph preprocessing rather than writing processed images to disk?**
+Three reasons, and the first is the decisive one:
+
+1. **Augmentation has to be on the fly to work at all.** The point of
+   augmentation is that the model sees a *differently* distorted copy of each
+   image every epoch. Writing augmented copies to disk freezes a fixed set of
+   variants — the model just memorises 5 versions instead of 1, and most of the
+   regularisation benefit disappears.
+2. **No stale derived data.** Changing the input size means changing one
+   constant. With a preprocessed copy on disk, there is a second dataset that can
+   silently disagree with the code that produced it — and nothing warns you.
+3. **Cost.** No second 18k-image copy to write, store or keep in sync.
+
+The trade-off is CPU work per epoch: decoding and resizing happen every time
+rather than once. `prefetch` and parallel decoding hide most of that cost, and
+for an 18k-image dataset it is clearly the right side of the trade. At a scale
+where decoding genuinely bottlenecks the model, the answer is
+`dataset.cache()` or a pre-built TFRecord — not a folder of JPEGs.
+
+**Why persist the split manifest, when nothing else is persisted?**
+Because the split must *never* change, while everything else must be free to.
+If the split were recomputed with a different shuffle between training and
+evaluation, images the model trained on would land in the test set and inflate
+the score. Saving three CSVs of paths (a few hundred KB) fixes the split
+permanently, and a fixed `random_state=42` makes it reproducible from scratch.
+
+**Why stratify?** With a 14.4× imbalance, a plain random split could deal the
+373-image mosaic-virus class an unlucky hand — leaving it with, say, 30 test
+images, where a handful of errors swings its recall by 10 points and the number
+means nothing. Stratifying forces every split to mirror the overall
+distribution. Measured result: the largest class-share drift between any two
+splits is **0.1 percentage points**.
+
+**Why these three augmentations specifically?** Each models a variation that
+genuinely occurs when photographing a leaf, and none of them changes the correct
+answer:
+
+- `RandomFlip` (horizontal + vertical) — a leaf has no inherent "up"; a flipped
+  leaf is the same disease. Free, completely safe variety.
+- `RandomRotation(0.1)` (≈±36°) — the camera not held square to the leaf.
+- `RandomZoom(0.1)` — the camera slightly nearer or further.
+
+**Why not more aggressive augmentation?** This is the more interesting half, and
+it is specific to this domain:
+
+- **No colour/brightness/hue jitter.** Diagnosis here depends on hue — yellow
+  mottling means mosaic virus, brown concentric rings mean early blight. Shifting
+  colours attacks the exact signal the model needs, and can push an image towards
+  the appearance of a *different* disease while keeping its original label. That
+  is actively harmful: it teaches the model something false.
+- **No shear or perspective warping.** These are flat, square-on lab photographs
+  of detached leaves. Simulating extreme perspective invents a distribution that
+  exists in neither the training nor the test data, spending model capacity on
+  variation that never occurs.
+- **No random cropping.** A lesion can be anywhere on the leaf. A crop may remove
+  the only diseased region while keeping the "diseased" label — again, a
+  wrong-label image.
+- **Rotation/zoom capped at ±10%** because larger rotations pad the corners with
+  empty pixels, and a network will happily learn to read that padding artefact
+  instead of the leaf.
+
+The general principle: augment along axes that genuinely vary (orientation,
+distance) and leave alone the axes that carry the diagnostic signal (colour).
+
+### Key metrics
+
+| Split | Images | Share | Imbalance ratio |
+|-------|-------:|------:|----------------:|
+| Train | 12,712 | 70.0% | 14.4× |
+| Validation | 2,724 | 15.0% | 14.3× |
+| Test | 2,724 | 15.0% | 14.4× |
+
+**Stratification verification — largest class-share drift between any two
+splits: 0.1 percentage points.** Per-class shares match the full-dataset
+distribution across all three splits (e.g. Yellow Leaf Curl Virus 29.5% / 29.5%
+/ 29.5%; mosaic virus 2.1% / 2.1% / 2.1%).
+
+**Pipeline check results — all six PASS:**
+
+| Check | Result |
+|---|---|
+| Batch shape | `(32, 128, 128, 3)` float32 for all splits |
+| Pixel range | min 0.000, max ≈0.95–0.97 → normalised exactly once |
+| Label validity | indices 0–9, all 10 classes seen across 320 samples |
+| Augmentation alters images | mean abs. diff from original 0.121 |
+| Augmentation is random | mean abs. diff between two calls 0.094 |
+| Val/test unaugmented | two passes bit-for-bit identical (max diff 0.0000000000) |
+
+### Likely interview questions
+
+**Q: Why do you augment only the training data and not validation or test?**
+A: Because they answer different questions. Training data exists to teach the
+model, so distorting it is useful — it forces the model to learn the underlying
+pattern rather than memorise specific photographs. Validation and test data exist
+to *measure* the model on realistic inputs. If I augmented them, I would be
+measuring performance on randomly distorted images that no user will ever submit,
+and worse, the score would jitter between runs as the random distortions changed
+— so I could not tell whether a change to the model helped or the dice just fell
+differently. There is a subtle trap here too: Keras preprocessing layers are
+deliberately no-ops when called with `training=False`, so if you put augmentation
+*inside* the model rather than in the input pipeline, it automatically disables
+itself at evaluation time. I kept it in the `tf.data` pipeline and applied it
+explicitly with `training=True`, then wrote a test asserting that two passes over
+the validation set are bit-for-bit identical — I would rather assert it than
+assume it.
+
+**Q: Why those augmentation types and not others?**
+A: The rule I used is that an augmentation must change the image without ever
+changing the correct label, and it should model a variation that actually occurs.
+Flips, small rotations and small zooms all pass: a leaf photographed upside down
+or from slightly further away is still the same disease. Colour jitter fails,
+and that is domain-specific reasoning — several of these diseases are identified
+*by* colour, so shifting hue can make a mosaic-virus leaf look like early blight
+while the label still says mosaic virus. That does not regularise the model, it
+poisons the labels. Random cropping fails for the same reason: crop out the only
+lesion and you have a picture of a healthy leaf labelled "diseased". This is the
+part people get wrong by reaching for a standard augmentation recipe — the right
+set depends entirely on what carries the signal in your data.
+
+**Q: How do you prevent data leakage between splits?**
+A: Four things. First, the split is on *file paths*, made once, before any image
+is loaded — so a single physical image can only ever land in one split. Second,
+the split is written to CSV and read back, rather than recomputed; a fresh
+shuffle between training and evaluation is the classic way test images silently
+end up in training. Third, `random_state` is fixed, so the split is identical on
+every machine and every run. Fourth — the one people forget — **all preprocessing
+statistics must come from training data only.** Here that is trivially satisfied
+because normalisation is a fixed divide by 255, not a mean/std computed from the
+data. If I had used per-channel standardisation, I would have had to compute the
+mean and standard deviation on the training split alone and apply those same
+constants to val and test; computing them over the whole dataset would leak
+information about the test set into the model's inputs.
+
+**Q: Why 128×128 rather than keeping the native 256×256?**
+A: Compute. Halving each dimension quarters the pixel count, so roughly quarters
+the convolution work per image. Training from scratch on a CPU, that is the
+difference between iterating on the architecture several times in an evening and
+managing one run overnight — and the number of experiments you can afford is
+usually what determines the final result. I did not go smaller than 128 because
+at 96×96 the fine speckling separating Septoria leaf spot from Target Spot starts
+to smear, and no model can learn a feature that is no longer present in its
+input. If accuracy on those two classes turns out to be the weak point in
+Phase 5, raising the input size is one of the first things I would try.

@@ -8,8 +8,8 @@ built from scratch with TensorFlow/Keras and trained on the
 [PlantVillage](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
 dataset from Kaggle. It is served through a lightweight **Flask** web app.
 
-> **Status:** Phase 2 of 7 complete — dataset acquired and explored. Later
-> phases add preprocessing, the trained model, evaluation and the web app.
+> **Status:** Phase 3 of 7 complete — data pipeline built and verified. Later
+> phases add the trained model, evaluation and the web app.
 > Sections marked *Coming soon* below get filled in as those phases land.
 
 ### Why this project?
@@ -83,14 +83,16 @@ CROP-DISEASE-DETECTION/
 │
 ├── data/                  # All dataset files (contents ignored by Git)
 │   ├── raw/               # Untouched PlantVillage images as downloaded
-│   └── processed/         # Resized / split images ready for training
+│   └── processed/         # Split manifests (CSV of filepath + label)
 │
 ├── notebooks/             # Jupyter notebooks for exploration and experiments
 │   ├── 01_eda.ipynb       # Exploratory data analysis of the tomato subset
+│   ├── 02_pipeline_check.ipynb  # Verifies the preprocessing pipeline is correct
 │   └── figures/           # Plots saved by the notebooks (embedded in this README)
 │
 ├── src/                   # Reusable Python code (download, preprocess, train, evaluate)
-│   └── download_data.py   # Fetches PlantVillage and extracts the tomato classes
+│   ├── download_data.py   # Fetches PlantVillage and extracts the tomato classes
+│   └── data_loader.py     # Manifest, stratified split, tf.data + augmentation
 │
 ├── models/                # Saved trained models (.keras / .h5 — ignored by Git)
 │
@@ -110,9 +112,10 @@ conventional structure for a small ML project (a trimmed-down version of the
 widely used *Cookiecutter Data Science* template), which means another developer
 can find their way around it immediately.
 
-`data/raw` is kept strictly read-only: every transformation writes into
-`data/processed` instead. That way the original download never has to be
-repeated, and any preprocessing bug can be traced back to a pristine source.
+`data/raw` is kept strictly read-only: nothing ever writes back into it, so the
+slow download never has to be repeated and any bug can be traced to a pristine
+source. `data/processed` holds only the **split manifests** — see
+[Preprocessing](#preprocessing) for why no processed images are written to disk.
 
 ---
 
@@ -196,6 +199,137 @@ python src/download_data.py               # download + extract the tomato subset
 python src/download_data.py --delete-zip  # ...and remove the 2 GB archive after
 ```
 
+## Preprocessing
+
+Implemented in [`src/data_loader.py`](src/data_loader.py); verified end to end in
+[`notebooks/02_pipeline_check.ipynb`](notebooks/02_pipeline_check.ipynb).
+
+```
+data/raw/tomato/<class>/*.JPG
+        │  build_manifest()      scan folders → (filepath, label) table
+        │  split_manifest()      stratified 70 / 15 / 15
+        │                        → data/processed/{train,val,test}_manifest.csv
+        │  make_dataset()        decode → resize 128×128 → scale to [0,1]
+        │  build_augmentation()  flip / rotate / zoom  ← TRAINING ONLY
+        ▼
+   batched, prefetched tf.data.Dataset → model.fit()
+```
+
+### Why 128×128?
+
+The source images are 256×256. Halving each side quarters the pixel count and
+therefore roughly quarters the convolution work per image — the difference
+between iterating on the architecture several times in an evening and waiting
+overnight per run, which matters because this model trains **from scratch on a
+CPU**.
+
+We do not go smaller. At 96×96 the fine speckling that separates Septoria leaf
+spot from Target Spot begins to smear together, and a model cannot learn a
+feature its input no longer contains. 128×128 keeps lesion texture legible while
+staying cheap.
+
+### Why in-graph preprocessing instead of writing processed images to disk?
+
+`data/processed/` holds **only the split manifests** — three CSVs of file paths
+and labels. No resized image is ever written. Resizing, normalising and
+augmenting happen inside the `tf.data` graph as images stream to the model.
+
+- **Augmentation *must* be on the fly.** Its entire purpose is that the model
+  sees a differently distorted copy of each image every epoch. Pre-computing it
+  would freeze a fixed set of variants and give away most of the benefit.
+- **No stale derived data.** Changing the input size from 128 to 160 means
+  changing one constant. With a pre-processed copy on disk there would be a
+  second dataset that silently disagrees with the code that produced it — a
+  genuinely nasty class of bug.
+- **Cheaper.** No second 18k-image copy to write, store, or keep in sync.
+- **The split, by contrast, *is* persisted** — precisely because it must never
+  change. A reshuffled split between training and evaluation would leak training
+  images into the test set and inflate the score.
+
+### Stratified 70 / 15 / 15 split
+
+| Split | Images | Share | Imbalance ratio |
+|-------|-------:|------:|----------------:|
+| Train | 12,712 | 70% | 14.4× |
+| Validation | 2,724 | 15% | 14.3× |
+| Test | 2,724 | 15% | 14.4× |
+
+**Stratified** means each split preserves the overall class proportions. With a
+14.4× imbalance, a plain random split could deal the 373-image mosaic-virus
+class an unlucky hand and leave its test score meaningless. Measured result:
+the largest drift in any class's share between any two splits is **0.1
+percentage points**, and the imbalance ratio is preserved in all three.
+
+<details>
+<summary>Per-class counts for every split</summary>
+
+| Class | Train | Val | Test | Total |
+|-------|------:|----:|-----:|------:|
+| Tomato Yellow Leaf Curl Virus | 3,750 | 803 | 804 | 5,357 |
+| Bacterial spot | 1,489 | 319 | 319 | 2,127 |
+| Late blight | 1,336 | 287 | 286 | 1,909 |
+| Septoria leaf spot | 1,240 | 266 | 265 | 1,771 |
+| Spider mites (two-spotted) | 1,173 | 251 | 252 | 1,676 |
+| Healthy | 1,114 | 239 | 238 | 1,591 |
+| Target spot | 983 | 210 | 211 | 1,404 |
+| Early blight | 700 | 150 | 150 | 1,000 |
+| Leaf mold | 666 | 143 | 143 | 952 |
+| Tomato mosaic virus | 261 | 56 | 56 | 373 |
+| **Total** | **12,712** | **2,724** | **2,724** | **18,160** |
+
+</details>
+
+### Augmentation — training split only
+
+| Layer | Setting | What real-world variation it models |
+|-------|---------|-------------------------------------|
+| `RandomFlip` | horizontal + vertical | A leaf has no inherent "up" — a flip never changes the diagnosis |
+| `RandomRotation` | ±0.1 (≈±36°) | Camera not held perfectly square to the leaf |
+| `RandomZoom` | ±0.1 | Camera slightly nearer or further away |
+
+![Augmentation check](notebooks/figures/augmentation_check.png)
+
+**Why modest, and what is deliberately excluded:**
+
+- **No brightness/contrast/hue jitter.** Diagnosis here depends on colour —
+  yellow mottling means mosaic virus, brown concentric rings mean early blight.
+  Shifting hues would destroy the exact signal the model needs, and could push an
+  image towards the appearance of a *different* disease while keeping its
+  original label. That is worse than no augmentation: it teaches the model
+  something false.
+- **No shear or heavy perspective warping.** These are flat, square-on lab
+  photographs. Simulating extreme perspective invents a distribution that
+  appears in neither the training nor the test data.
+- **No random cropping.** A lesion may be anywhere on the leaf; a crop can
+  remove the only diseased region while keeping the "diseased" label.
+
+Rotation and zoom stay at ±10% because larger rotations pad the corners with
+empty pixels, and a model will happily learn to read that padding artefact
+instead of the leaf.
+
+**Validation and test data are never augmented** — they exist to estimate
+performance on real, untouched images. The pipeline check confirms both are
+bit-for-bit identical across two passes.
+
+### Batching and prefetching
+
+Batch size **32**, with `num_parallel_calls=AUTOTUNE` on image decoding and
+`prefetch(AUTOTUNE)` at the end. Decoding JPEGs is CPU work that would otherwise
+leave the model idle between batches; prefetching overlaps it with training, so
+while the model processes batch *N* the CPU is already assembling batch *N+1*.
+
+### Rebuilding the split
+
+```bash
+python src/data_loader.py    # writes data/processed/*.csv and prints the breakdown
+```
+
+The manifests live under `data/processed/`, which is gitignored, so they are not
+committed. They do not need to be: the split is derived from a sorted file scan
+with a fixed `random_state=42`, so re-running the command on any machine
+reproduces the identical split. `load_splits()` regenerates them automatically if
+they are missing.
+
 ## Model
 
 *Coming soon (Phase 4).* Will cover: the CNN architecture layer by layer, why
@@ -219,7 +353,7 @@ to classify your own leaf photo.
 |-------|-------------|--------|
 | 1 | Project structure, dependencies, README | ✅ Done |
 | 2 | Dataset download + exploratory data analysis | ✅ Done |
-| 3 | Preprocessing and augmentation pipeline | ⬜ Not started |
+| 3 | Preprocessing and augmentation pipeline | ✅ Done |
 | 4 | Build and train the CNN | ⬜ Not started |
 | 5 | Evaluation: accuracy, confusion matrix, error analysis | ⬜ Not started |
 | 6 | Flask web app | ⬜ Not started |
