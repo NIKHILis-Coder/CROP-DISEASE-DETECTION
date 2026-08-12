@@ -911,6 +911,29 @@ a long run. Getting 1.176 tells me the whole chain — manifest, split, decode,
 resize, normalise, label mapping, loss function — is wired up correctly. That
 is a lot of things confirmed for very little time.
 
+**Q: You had a 5-hour training run that had to be killed. Walk me through what went wrong.**
+A: I added a `tf.data` cache to speed up training, which required moving the
+shuffle after the decode step — otherwise the cache would freeze a single fixed
+ordering and silently destroy the shuffle. That reordering was correct, but it
+changed what the shuffle buffer *held*: previously 12,712 file path strings
+(about 1 MB), now 12,712 decoded images (about 596 MB). I had carefully sized
+the cache against available RAM and never re-examined the buffer, because the
+line `ds.shuffle(len(paths))` hadn't changed — only what flowed into it had. On
+a 7.5 GB laptop the run paged itself to a standstill: CPU parallelism collapsed
+from 7.4× to 1.5×, the process accumulated 2.7 GB of pagefile, and after 5 hours
+21 minutes it had finished roughly 11 of 30 epochs and was still slowing, so I
+killed it. What made it diagnosable was measuring **CPU-seconds per wall-second**
+rather than wall-time per epoch — a compute-bound process getting 1.5 cores out
+of 6 is not slow, it's blocked, and that distinction pointed straight at memory
+rather than at the model. Three things came out of it: I bounded the shuffle
+buffer explicitly at 2,048 images, I dropped the cache entirely (profiling had
+already shown it gave a 0.97× "speedup" — the workload was compute-bound, so it
+was never going to help), and I added a startup RAM guard so `train.py` refuses
+to launch below 700 MB free rather than discovering the problem three hours in.
+The broader lesson is the one I'd lead with: **reordering stages in a data
+pipeline silently changes the memory footprint of the stages around them**, and a
+code review of that diff would have read "ordering fix, no behaviour change".
+
 ---
 
 ## Phase 5 — Evaluation
@@ -1200,3 +1223,233 @@ tomato leaf?"; or properly, training an out-of-distribution detector or adding a
 two-thirds of that — surface the uncertainty, and state the scope in a disclaimer
 on the page — and I would flag OOD detection as required work before anything
 like this went in front of real users.
+
+---
+
+## Elevator Pitch
+
+*For the "so, tell me about this project" opener.*
+
+I built an end-to-end crop disease classifier: it takes a photo of a tomato leaf
+and tells you which of ten diseases it has, or that it's healthy. The model is a
+small convolutional neural network — about 112,000 parameters, three conv blocks
+— trained from scratch on the PlantVillage tomato subset, roughly 18,000 images
+across 10 classes. It's served through a Flask app where you upload an image and
+get the top three predictions with confidence scores. On the held-out test set it
+reaches **76.8% accuracy with a macro-F1 of 0.74**, against a majority-class
+baseline of 29.5%. The whole pipeline is reproducible from the repository: the
+dataset download is scripted, the train/validation/test split is committed as
+CSVs, and a CI job smoke-tests that the model still builds.
+
+What I think makes it worth talking about isn't the accuracy number — it's that
+the interesting problems weren't the machine learning. **I profiled a `tf.data`
+cache expecting a big speedup and measured 0.97×**, because the workload was
+compute-bound rather than I/O-bound; I could show the arithmetic — about 165
+million multiply-accumulates per image — that accounted for essentially the whole
+epoch time. Worse, **adding that cache required reordering the pipeline, which
+silently inflated a shuffle buffer from 1 MB to 596 MB** — the line of code never
+changed, only what flowed into it — and that paged a 7.5 GB laptop into a
+standstill and cost a five-hour training run. I diagnosed it by watching
+CPU-seconds per wall-second rather than wall-clock per epoch, because a
+compute-bound process getting 1.5 of 6 cores isn't slow, it's blocked. And when I
+built the Flask app, **end-to-end testing caught that Pillow's bilinear resize
+antialiases while TensorFlow's doesn't** — a difference large enough to flip the
+predicted class on two of three test images, with no error raised anywhere.
+
+So the honest summary is: a working, deployed, reproducible classifier whose
+reported numbers are a floor rather than a ceiling — it's undertrained at five
+epochs on 64×64 inputs because I had to fit the hardware I had — plus a written
+record of three genuine engineering failures and how each was diagnosed and
+fixed. The obvious next step is transfer learning with MobileNetV2 on a GPU,
+which would likely reach the mid-90s in a fraction of the time, because the model
+would no longer have to learn edge detectors from scratch on 12,000 images.
+
+---
+
+## Appendix — Anticipated Questions
+
+Every question from every phase, in one place, with a compressed answer. Full
+reasoning lives in the phase section named in each heading.
+
+### Project structure and tooling (Phase 1)
+
+**Why structure the project this way instead of one script?**
+Separating data, source, models and app lets each change independently, and the
+layout is a trimmed *Cookiecutter Data Science* template so it's immediately
+familiar. One script is fine for a throwaway experiment; structure earns its keep
+once stages get re-run at different times.
+
+**What if you committed the dataset and trained model to Git?**
+The repo balloons past a gigabyte, clones take minutes, GitHub rejects files over
+100 MB, and because Git snapshots whole binaries, retraining a few times bloats
+history permanently — deleting later doesn't shrink it. Both artefacts are
+reproducible, so committing the code that makes them is enough. Alternatives:
+Git LFS or DVC.
+
+**Why bother with a virtual environment?**
+Isolates this project's libraries so another project's NumPy can't break it, and
+it makes `requirements.txt` honest because the environment started empty.
+
+**Why gitignore `.env` and `kaggle.json`?**
+`kaggle.json` is an API key tied to my account; secret-scanning bots find leaked
+keys within minutes, and deleting the file in a later commit doesn't help because
+it stays in history. The only fix after a leak is revocation — so don't commit it.
+
+### Dataset and EDA (Phase 2)
+
+**Why not the full 54,000-image dataset?**
+Practically, 18k vs 54k is ~3× epoch time on a CPU, which decides how many
+experiments I can afford. More interestingly, the full set is partly an *easier*
+problem — much of it is telling apples from corn, solvable from leaf shape. One
+crop forces discrimination between diseases of the same species, which is the
+genuinely hard part.
+
+**You have a 14× class imbalance. How did you handle it?**
+Measured it, then let it drive three decisions: quote the 29.5% majority baseline
+alongside any accuracy; stratify every split so the 373-image class isn't left to
+chance; report a confusion matrix and per-class recall rather than accuracy alone.
+I used inverse-frequency `class_weight` in training and deliberately did not
+resample first — establish a baseline, then fix what the confusion matrix shows.
+
+**What did the EDA change about your plan?**
+Total image uniformity (every file 256×256 RGB) removed the aspect-ratio handling
+I'd expected to need; zero corrupt files removed defensive error handling from the
+loader; and the imbalance figure drove stratification plus confusion-matrix-based
+evaluation.
+
+**What's the dataset's biggest weakness?**
+The domain gap: lab photos of single detached leaves on plain backgrounds. The
+test split shares that unrealistic distribution, so a strong score proves the
+pipeline works, not that the model is field-ready.
+
+### Preprocessing (Phase 3)
+
+**Why augment only training data?**
+Training data teaches, so distorting it helps generalisation. Validation and test
+*measure*, and augmenting them would score the model on inputs no user submits and
+make results jitter run to run. Subtle trap: Keras preprocessing layers are no-ops
+at `training=False`, so I applied them explicitly in the input pipeline and wrote
+a test asserting two validation passes are bit-for-bit identical.
+
+**Why those augmentations and not others?**
+Rule: it must change the image without ever changing the correct label, and model
+a variation that really occurs. Flips, ±10% rotation and ±10% zoom pass. Colour
+jitter fails — several of these diseases are identified *by* hue, so shifting it
+can make mosaic virus look like early blight while the label still says mosaic
+virus. Random cropping fails too: crop out the only lesion and you have a healthy
+leaf labelled diseased.
+
+**How do you prevent data leakage between splits?**
+Split on file paths before any image loads, so one image lands in exactly one
+split; persist the split to CSV and commit it so it can't be silently reshuffled;
+fix `random_state`; and keep all preprocessing statistics constant (a fixed /255,
+not a mean computed from data). The subtler one I guard against is *selection*
+leakage — validation drove early stopping and checkpointing, so I report on test.
+
+**Why 128×128 rather than native 256×256?** *(later reduced to 64×64)*
+Halving each dimension quarters the convolution work, which is what makes multiple
+experiments affordable on a CPU. Below 128 the fine speckling separating Septoria
+leaf spot from Target Spot starts to smear — and when hardware later forced 64×64,
+exactly that confusion appeared in the results.
+
+### Architecture and training (Phase 4)
+
+**112k parameters — isn't that far too small?**
+The data sets the ceiling: 12,712 training images can be memorised by a
+multi-million-parameter model. It's also where `GlobalAveragePooling2D` pays off —
+`Flatten` would put ~1M parameters in a single dense layer. If the model
+*underfit*, I'd add a fourth conv block before touching the head; nothing in the
+curves suggests capacity is the limit rather than training time.
+
+**Validation loss 3.79 vs training loss 1.18 after one epoch — overfitting?**
+Almost certainly not after 398 gradient steps. It's BatchNorm's train/inference
+mismatch: batch statistics during training, poorly-converged moving averages at
+inference. The distinguishing test is to keep training — and this resolved exactly
+as predicted, with val loss collapsing from 2.96 to 0.83 at epoch 4.
+
+**Why a one-epoch benchmark instead of just training?**
+Turns an unknown into a number (8.6 min/epoch → 4.3 hours for 30), and it's the
+cheapest smoke test for a broken pipeline: loss near ln(10)=2.30 would mean
+mislabelled data or a bad learning rate, discovered in minutes rather than hours.
+
+**Why `class_weight` over oversampling or focal loss?**
+Costs nothing — no extra data, no longer epochs, one argument to `fit()`, so it's
+trivial to ablate. Oversampling would duplicate the 373-image class ~14× and
+invite memorising those specific images. Focal loss is built for ~1000:1 imbalance
+and adds a hyperparameter; at 14.4× it's a heavier tool than the problem needs.
+
+**Why early-stop on `val_loss` not `val_accuracy`?**
+With 14.4× imbalance, accuracy can rise while the model gets *worse* at rare
+classes. Loss is computed on probabilities, so it detects falling confidence
+before the arg-max flips, and since `class_weight` applies to the loss, the
+monitored quantity is the class-balanced objective actually being optimised.
+Accuracy is also a step function — poor signal for a patience rule.
+
+**Walk me through the 5-hour training run that had to be killed.**
+Adding a cache required moving shuffle after decode, which changed the buffer from
+1 MB of paths to 596 MB of images without the line itself changing. The machine
+paged: parallelism fell 7.4× → 1.5×, 2.7 GB pagefile, ~11 of 30 epochs in 5h21m.
+Diagnosed via CPU-seconds per wall-second, not wall-clock. Fixed by bounding the
+buffer at 2,048, dropping the cache (already measured at 0.97×), and adding a
+startup RAM guard.
+
+### Evaluation (Phase 5)
+
+**76.76% accuracy — is that good?**
+Against a 29.5% baseline it's about +47 points, but it isn't the architecture's
+ceiling: the run hit a 5-epoch cap with validation loss still falling, on 64×64
+inputs chosen because larger configs wouldn't complete on my hardware. Published
+PlantVillage models reach the high 90s; the gap is explained by resolution,
+training length and no transfer learning — all nameable, not hand-waved.
+
+**Why macro-F1 as well as accuracy?**
+Accuracy hides per-class failure under imbalance. Macro-F1 gives every class an
+equal vote. Here they're close (0.745 vs 0.773), and that closeness is itself the
+result — the class weighting worked.
+
+**How do you know test data didn't leak into training?**
+Path-level split made once before loading; split committed to CSV so it can't
+reshuffle; fixed seed; constant preprocessing statistics. Plus reporting on test
+rather than validation, since validation drove early stopping and checkpointing.
+
+**The model over-predicts Bacterial spot — what would you do?**
+It's the class the model retreats to when uncertain (0.99 recall, 0.54 precision).
+In order: train longer (it hit the epoch cap while improving), raise resolution
+back to 128×128 (the classes bleeding into it are fine-textured), then consider
+decision thresholds. Adding capacity would be last — the evidence says
+training-limited, not capacity-limited.
+
+**Why show the most confident misclassifications, not random ones?**
+A 99%-confident error points at a systematic confusion or a mislabelled image; a
+35%-confident one is just the model admitting uncertainty. Sorting by confidence
+finds structure rather than noise.
+
+### Deployment (Phase 6)
+
+**What happens under real production load?**
+`app.run()` is a single-process dev server. First fix is Gunicorn/Waitress with
+several workers — which raises memory, since each worker loads its own model copy
+(fine at 1.4 MB, a real constraint at 500 MB, where the answer is TensorFlow
+Serving). Then request batching, rate limiting, size limits, and structured
+logging of prediction distributions.
+
+**How would you know if the deployed model degraded?**
+Production has no labels, so watch indirect signals: the **confidence
+distribution** (drifts when inputs stop resembling training data) and the
+**predicted-class distribution** (a sudden spike usually means input drift, not an
+outbreak). Both need no ground truth. Then sample a fraction of real uploads for
+manual labelling.
+
+**Someone uploads a photo of a dog — what happens?**
+It confidently returns a tomato disease, because a softmax over 10 classes must
+sum to 1. That's a genuine limitation, not a fixable bug. Mitigations: show top-3
+confidences, add a confidence threshold, or properly train an OOD detector or a
+"not a leaf" class. I did the first two-thirds and would flag OOD detection as
+required before real users.
+
+**Why does inference preprocessing have to match training exactly?**
+Because mismatches fail silently. Mine did: Pillow's `BILINEAR` antialiases when
+downscaling, `tf.image.resize` (default `antialias=False`) does not. At 256→64
+that produced a 0.19 max per-pixel difference and changed the predicted class on
+2 of 3 images — no error, just worse answers. Fixed by using identical TensorFlow
+ops and importing `IMAGE_SIZE` from the training module instead of hardcoding it.

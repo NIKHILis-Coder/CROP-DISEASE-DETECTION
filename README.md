@@ -1,346 +1,135 @@
-# Crop Disease Detection
+# 🍅 Crop Disease Detection
 
-A deep-learning web app that identifies plant diseases from a photo of a leaf.
+**Identify tomato leaf diseases from a photo, using a CNN trained from scratch and served through a Flask web app.**
 
-Upload a leaf image and the app returns the predicted disease along with a
-confidence score. The model is a small **Convolutional Neural Network (CNN)**
-built from scratch with TensorFlow/Keras and trained on the
-[PlantVillage](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
-dataset from Kaggle. It is served through a lightweight **Flask** web app.
-
-> **Status:** Phase 3 of 7 complete — data pipeline built and verified. Later
-> phases add the trained model, evaluation and the web app.
-> Sections marked *Coming soon* below get filled in as those phases land.
-
-### Why this project?
-
-Crop disease is a major cause of yield loss, and early identification usually
-depends on an expert being physically present. A phone camera plus an image
-classifier makes a first-pass diagnosis available to anyone. This repository is
-a compact, end-to-end demonstration of that idea: **raw data → preprocessing →
-model → evaluation → deployed app.**
+![App screenshot](notebooks/figures/app_screenshots/02_prediction_diseased.png)
 
 ---
 
-## Setup
+## The problem
 
-### Prerequisites
+Crop disease is one of the largest causes of yield loss worldwide, and
+identifying it early usually depends on an expert being physically present. A
+smartphone camera plus an image classifier puts a first-pass diagnosis in the
+hands of anyone with a phone.
 
-- **Python 3.10–3.12.** TensorFlow does not publish builds for Python 3.13+ yet,
-  so a newer Python will fail at `pip install`.
-- A [Kaggle account](https://www.kaggle.com/) for downloading the dataset
-  (needed from Phase 2 onward).
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/NIKHILis-Coder/CROP-DISEASE-DETECTION.git
-cd CROP-DISEASE-DETECTION
-```
-
-### 2. Create and activate a virtual environment
-
-A virtual environment keeps this project's libraries separate from every other
-Python project on your machine, so versions can't clash.
-
-```bash
-# Windows (PowerShell) -- the "py -3.12" part picks a TensorFlow-compatible Python
-py -3.12 -m venv venv
-venv\Scripts\Activate.ps1
-```
-
-```bash
-# macOS / Linux
-python3.12 -m venv venv
-source venv/bin/activate
-```
-
-Your prompt should now start with `(venv)`.
-
-### 3. Install the dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Set up Kaggle API access *(needed from Phase 2)*
-
-1. On Kaggle: **Account → Settings → API → Create New Token.** This downloads a
-   `kaggle.json` file containing your username and API key.
-2. Move it to the location the Kaggle library looks in:
-   - Windows: `C:\Users\<you>\.kaggle\kaggle.json`
-   - macOS / Linux: `~/.kaggle/kaggle.json` (then run `chmod 600 ~/.kaggle/kaggle.json`)
-
-`kaggle.json` is a **secret** — it is listed in `.gitignore` and must never be
-committed.
-
----
-
-## Project structure
-
-```
-CROP-DISEASE-DETECTION/
-│
-├── data/                  # All dataset files (contents ignored by Git)
-│   ├── raw/               # Untouched PlantVillage images as downloaded
-│   └── processed/         # Split manifests (CSV of filepath + label)
-│
-├── notebooks/             # Jupyter notebooks for exploration and experiments
-│   ├── 01_eda.ipynb       # Exploratory data analysis of the tomato subset
-│   ├── 02_pipeline_check.ipynb  # Verifies the preprocessing pipeline is correct
-│   └── figures/           # Plots saved by the notebooks (embedded in this README)
-│
-├── src/                   # Reusable Python code (download, preprocess, train, evaluate)
-│   ├── download_data.py   # Fetches PlantVillage and extracts the tomato classes
-│   └── data_loader.py     # Manifest, stratified split, tf.data + augmentation
-│
-├── models/                # Saved trained models (.keras / .h5 — ignored by Git)
-│
-├── app/                   # The Flask web application
-│   ├── templates/         # HTML pages rendered by Flask
-│   └── static/            # CSS, images, and user-uploaded files
-│
-├── requirements.txt       # Python dependencies
-├── .gitignore             # Files Git should not track
-├── INTERVIEW_PREP.md      # Design decisions + Q&A, written up phase by phase
-└── README.md              # This file
-```
-
-**Why this layout?** Data, code, models and the app each live in their own
-folder, so any one of them can be changed without touching the others. It is the
-conventional structure for a small ML project (a trimmed-down version of the
-widely used *Cookiecutter Data Science* template), which means another developer
-can find their way around it immediately.
-
-`data/raw` is kept strictly read-only: nothing ever writes back into it, so the
-slow download never has to be repeated and any bug can be traced to a pristine
-source. `data/processed` holds only the **split manifests** — see
-[Preprocessing](#preprocessing) for why no processed images are written to disk.
+This repository is a compact, honest, end-to-end demonstration of that idea:
+**raw data → exploration → preprocessing → model → evaluation → deployed app** —
+including the parts that went wrong and what was done about them.
 
 ---
 
 ## Dataset
 
-**Source:** the [PlantVillage dataset](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
-on Kaggle — 54,305 lab photographs of healthy and diseased leaves covering 38
-classes across 14 crops, released for public research use.
+The [PlantVillage dataset](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
+on Kaggle — 54,305 laboratory photographs of healthy and diseased leaves across
+38 classes and 14 crops.
 
-**Scope used here:** the **tomato subset only** — **18,160 colour images across
-10 classes** (nine diseases plus healthy). Download and extraction are scripted
-in [`src/download_data.py`](src/download_data.py); the full exploration lives in
-[`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb).
-
-| Class | Images | Share |
-|-------|-------:|------:|
-| Tomato Yellow Leaf Curl Virus | 5,357 | 29.5% |
-| Bacterial spot | 2,127 | 11.7% |
-| Late blight | 1,909 | 10.5% |
-| Septoria leaf spot | 1,771 | 9.8% |
-| Spider mites (two-spotted) | 1,676 | 9.2% |
-| Healthy | 1,591 | 8.8% |
-| Target spot | 1,404 | 7.7% |
-| Early blight | 1,000 | 5.5% |
-| Leaf mold | 952 | 5.2% |
-| Tomato mosaic virus | 373 | 2.1% |
-| **Total** | **18,160** | **100%** |
+This project uses the **tomato subset**: **18,160 colour images across 10
+classes** (nine diseases plus healthy). Download and extraction are scripted in
+[`src/download_data.py`](src/download_data.py), which pulls only the tomato
+classes straight out of the 162,916-file archive.
 
 ![Class distribution](notebooks/figures/class_distribution.png)
 
-### Why subset to tomato?
+| Property | Value |
+|---|---|
+| Images | 18,160 |
+| Classes | 10 (9 diseases + healthy) |
+| Resolution | 256×256 RGB JPEG — **100%** of images |
+| Corrupt files | **0** |
+| Class imbalance | **14.4×** (5,357 → 373 images) |
+| Majority-class baseline | **29.5%** |
 
-**Training time.** The model here is a small CNN trained **from scratch on a
-CPU** — no pre-trained weights, no GPU. Cutting the data from 54k images to 18k
-cuts every training epoch to roughly a third, which is the difference between
-iterating on the architecture several times an evening and waiting overnight per
-run. Fast iteration matters more than raw scale for a project whose point is to
-demonstrate the pipeline end to end.
+**Why tomato only?** It is the best-represented crop in PlantVillage, giving 10
+classes without any being uselessly small. More importantly it makes the problem
+*harder and more meaningful*: the model must separate diseases of the same
+species — early blight from late blight from Septoria leaf spot — rather than
+the much easier task of telling an apple leaf from a corn leaf.
 
-**A sharper, more honest problem.** All 10 classes are the same crop, so the
-model must separate *diseases of tomato* rather than the much easier task of
-telling an apple leaf from a grape leaf. Distinguishing early blight from late
-blight is genuinely hard and visually subtle; distinguishing corn from tomato is
-not. A high score on the tomato subset therefore means considerably more than
-the same score across all 38 classes.
+Full exploration in [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb).
 
-**Tomato is the natural choice** for the subset: it is the single best-
-represented crop in PlantVillage, with the widest range of diseases, so it gives
-10 classes without any of them being uselessly small.
-
-### What the data looks like
-
-![Sample images](notebooks/figures/sample_images.png)
-
-**Key findings from the EDA:**
-
-- **Perfectly uniform format.** Every one of the 18,160 images is **256×256 RGB
-  JPEG** — 100% square, a single aspect ratio. Resizing for the CNN is therefore
-  a clean downscale with no distortion or cropping decisions.
-- **Zero corrupt files.** All 18,160 passed a `PIL.Image.verify()` integrity
-  check, so the data loader needs no error handling for unreadable images.
-- **Moderate class imbalance — 14.4×** between the largest class (Yellow Leaf
-  Curl Virus, 5,357) and the smallest (Tomato mosaic virus, 373). This sets the
-  **majority-class baseline at 29.5%**: a model that ignores the image entirely
-  and always guesses the biggest class would score that. Any reported accuracy
-  has to be read against that number.
-- **Consequences for later phases:** the train/val/test split must be
-  **stratified** so rare classes appear in every split, and evaluation must
-  report a **confusion matrix and per-class recall**, not accuracy alone.
-
-**Known limitation:** PlantVillage images are laboratory photographs of single
-detached leaves on plain backgrounds. A model trained on them will not
-automatically work on a phone photo taken in a field, where soil, sky and
-overlapping foliage fill the frame. This *domain gap* is the honest caveat about
-the finished app.
-
-### Reproducing the dataset locally
-
-```bash
-python src/download_data.py               # download + extract the tomato subset
-python src/download_data.py --delete-zip  # ...and remove the 2 GB archive after
-```
+---
 
 ## Preprocessing
-
-Implemented in [`src/data_loader.py`](src/data_loader.py); verified end to end in
-[`notebooks/02_pipeline_check.ipynb`](notebooks/02_pipeline_check.ipynb).
 
 ```
 data/raw/tomato/<class>/*.JPG
         │  build_manifest()      scan folders → (filepath, label) table
         │  split_manifest()      stratified 70 / 15 / 15
         │                        → data/processed/{train,val,test}_manifest.csv
-        │  make_dataset()        decode → resize 128×128 → scale to [0,1]
+        │  make_dataset()        decode → resize 64×64 → scale to [0,1]
         │  build_augmentation()  flip / rotate / zoom  ← TRAINING ONLY
         ▼
    batched, prefetched tf.data.Dataset → model.fit()
 ```
 
-### Why 128×128?
-
-The source images are 256×256. Halving each side quarters the pixel count and
-therefore roughly quarters the convolution work per image — the difference
-between iterating on the architecture several times in an evening and waiting
-overnight per run, which matters because this model trains **from scratch on a
-CPU**.
-
-We do not go smaller. At 96×96 the fine speckling that separates Septoria leaf
-spot from Target Spot begins to smear together, and a model cannot learn a
-feature its input no longer contains. 128×128 keeps lesion texture legible while
-staying cheap.
-
-### Why in-graph preprocessing instead of writing processed images to disk?
-
-`data/processed/` holds **only the split manifests** — three CSVs of file paths
-and labels. No resized image is ever written. Resizing, normalising and
-augmenting happen inside the `tf.data` graph as images stream to the model.
-
-- **Augmentation *must* be on the fly.** Its entire purpose is that the model
-  sees a differently distorted copy of each image every epoch. Pre-computing it
-  would freeze a fixed set of variants and give away most of the benefit.
-- **No stale derived data.** Changing the input size from 128 to 160 means
-  changing one constant. With a pre-processed copy on disk there would be a
-  second dataset that silently disagrees with the code that produced it — a
-  genuinely nasty class of bug.
-- **Cheaper.** No second 18k-image copy to write, store, or keep in sync.
-- **The split, by contrast, *is* persisted** — precisely because it must never
-  change. A reshuffled split between training and evaluation would leak training
-  images into the test set and inflate the score.
-
-### Stratified 70 / 15 / 15 split
-
-| Split | Images | Share | Imbalance ratio |
-|-------|-------:|------:|----------------:|
+| Split | Images | Share | Imbalance preserved |
+|-------|-------:|------:|---:|
 | Train | 12,712 | 70% | 14.4× |
 | Validation | 2,724 | 15% | 14.3× |
 | Test | 2,724 | 15% | 14.4× |
 
-**Stratified** means each split preserves the overall class proportions. With a
-14.4× imbalance, a plain random split could deal the 373-image mosaic-virus
-class an unlucky hand and leave its test score meaningless. Measured result:
-the largest drift in any class's share between any two splits is **0.1
-percentage points**, and the imbalance ratio is preserved in all three.
+The split is **stratified** so every class keeps its proportions — measured
+drift between splits is **0.1 percentage points**. It is written to CSV and
+committed, so the exact split is reproducible from the repository and cannot
+silently reshuffle between training and evaluation.
 
-<details>
-<summary>Per-class counts for every split</summary>
+**Augmentation (training split only):** `RandomFlip` (a leaf has no inherent
+"up"), `RandomRotation(0.1)`, `RandomZoom(0.1)`. Deliberately **no colour or
+brightness jitter** — several of these diseases are identified *by* hue, so
+shifting colours would attack the exact signal the model needs and could push an
+image toward the appearance of a different disease while keeping its original
+label.
 
-| Class | Train | Val | Test | Total |
-|-------|------:|----:|-----:|------:|
-| Tomato Yellow Leaf Curl Virus | 3,750 | 803 | 804 | 5,357 |
-| Bacterial spot | 1,489 | 319 | 319 | 2,127 |
-| Late blight | 1,336 | 287 | 286 | 1,909 |
-| Septoria leaf spot | 1,240 | 266 | 265 | 1,771 |
-| Spider mites (two-spotted) | 1,173 | 251 | 252 | 1,676 |
-| Healthy | 1,114 | 239 | 238 | 1,591 |
-| Target spot | 983 | 210 | 211 | 1,404 |
-| Early blight | 700 | 150 | 150 | 1,000 |
-| Leaf mold | 666 | 143 | 143 | 952 |
-| Tomato mosaic virus | 261 | 56 | 56 | 373 |
-| **Total** | **12,712** | **2,724** | **2,724** | **18,160** |
+Verified end to end in
+[`notebooks/02_pipeline_check.ipynb`](notebooks/02_pipeline_check.ipynb): batch
+shapes, pixel range, label alignment, augmentation randomness, and that
+validation/test are bit-for-bit identical across passes.
 
-</details>
-
-### Augmentation — training split only
-
-| Layer | Setting | What real-world variation it models |
-|-------|---------|-------------------------------------|
-| `RandomFlip` | horizontal + vertical | A leaf has no inherent "up" — a flip never changes the diagnosis |
-| `RandomRotation` | ±0.1 (≈±36°) | Camera not held perfectly square to the leaf |
-| `RandomZoom` | ±0.1 | Camera slightly nearer or further away |
-
-![Augmentation check](notebooks/figures/augmentation_check.png)
-
-**Why modest, and what is deliberately excluded:**
-
-- **No brightness/contrast/hue jitter.** Diagnosis here depends on colour —
-  yellow mottling means mosaic virus, brown concentric rings mean early blight.
-  Shifting hues would destroy the exact signal the model needs, and could push an
-  image towards the appearance of a *different* disease while keeping its
-  original label. That is worse than no augmentation: it teaches the model
-  something false.
-- **No shear or heavy perspective warping.** These are flat, square-on lab
-  photographs. Simulating extreme perspective invents a distribution that
-  appears in neither the training nor the test data.
-- **No random cropping.** A lesion may be anywhere on the leaf; a crop can
-  remove the only diseased region while keeping the "diseased" label.
-
-Rotation and zoom stay at ±10% because larger rotations pad the corners with
-empty pixels, and a model will happily learn to read that padding artefact
-instead of the leaf.
-
-**Validation and test data are never augmented** — they exist to estimate
-performance on real, untouched images. The pipeline check confirms both are
-bit-for-bit identical across two passes.
-
-### Batching and prefetching
-
-Batch size **32**, with `num_parallel_calls=AUTOTUNE` on image decoding and
-`prefetch(AUTOTUNE)` at the end. Decoding JPEGs is CPU work that would otherwise
-leave the model idle between batches; prefetching overlaps it with training, so
-while the model processes batch *N* the CPU is already assembling batch *N+1*.
-
-### Rebuilding the split
-
-```bash
-python src/data_loader.py    # writes data/processed/*.csv and prints the breakdown
-```
-
-The manifests live under `data/processed/`, which is gitignored, so they are not
-committed. They do not need to be: the split is derived from a sorted file scan
-with a fixed `random_state=42`, so re-running the command on any machine
-reproduces the identical split. `load_splits()` regenerates them automatically if
-they are missing.
+---
 
 ## Model
 
-*Coming soon (Phase 4).* Will cover: the CNN architecture layer by layer, why
-each layer is there, parameter count, and training configuration.
+A small CNN trained **from scratch** — no pre-trained weights, no GPU.
+
+```
+Input (64, 64, 3)
+   │
+   ├─ Conv2D(32, 3×3, relu, same) ─ BatchNorm ─ MaxPool(2×2)   → 32×32×32
+   ├─ Conv2D(64, 3×3, relu, same) ─ BatchNorm ─ MaxPool(2×2)   → 16×16×64
+   ├─ Conv2D(128, 3×3, relu, same) ─ BatchNorm ─ MaxPool(2×2)  →  8×8×128
+   │
+   ├─ GlobalAveragePooling2D                                    → 128
+   ├─ Dense(128, relu)                                          → 128
+   ├─ Dropout(0.5)
+   └─ Dense(10, softmax)                                        → 10 classes
+
+Total parameters: 111,946  (111,498 trainable + 448 BatchNorm moving averages)
+Optimiser: Adam (lr 1e-3) · Loss: sparse categorical crossentropy
+```
+
+**Why so small?** Because the data sets the ceiling, not ambition. With 12,712
+training images, a multi-million-parameter model memorises rather than
+generalises.
+
+**`GlobalAveragePooling2D` instead of `Flatten` is the highest-leverage choice
+here.** `Flatten` on the 8×8×128 feature map would feed 8,192 values into
+`Dense(128)` — about 1.05M parameters, roughly ten times the entire current
+model, concentrated in one layer. Global average pooling gives 128 values and
+16,512 parameters instead, and adds translation invariance: a lesion in the
+corner means the same thing as one in the centre.
+
+**Class imbalance** is handled with inverse-frequency `class_weight` (0.339 for
+the largest class up to 4.870 for the rarest — a 14.4× ratio mirroring the
+imbalance exactly), rather than oversampling or focal loss.
+
+---
 
 ## Results
 
-Measured on the **held-out test split** (2,724 images) — data untouched by
-training, early stopping or checkpoint selection. Full analysis in
-[`notebooks/04_evaluation.ipynb`](notebooks/04_evaluation.ipynb); raw numbers in
-[`models/evaluation_metrics.json`](models/evaluation_metrics.json).
+Measured on the **held-out test split** (2,724 images), untouched by training,
+early stopping or checkpoint selection.
 
 | Metric | Value |
 |---|---|
@@ -349,11 +138,9 @@ training, early stopping or checkpoint selection. Full analysis in
 | **Macro F1** | **0.7448** |
 | **Weighted F1** | **0.7732** |
 | Majority-class baseline | 29.5% |
-| Lift over baseline | **+47.3 points** |
+| **Lift over baseline** | **+47.3 points** |
 
 ![Confusion matrix](notebooks/figures/confusion_matrix_normalized.png)
-
-### Per-class
 
 | Class | Precision | Recall | F1 | Support |
 |---|---:|---:|---:|---:|
@@ -368,89 +155,180 @@ training, early stopping or checkpoint selection. Full analysis in
 | Target spot | 0.98 | 0.38 | 0.55 | 211 |
 | Early blight | 0.39 | 0.70 | **0.50** | 150 |
 
-**Macro-F1 (0.745) is only 0.028 below weighted-F1 (0.773)**, which means
-performance is reasonably even across classes rather than propped up by the
-large ones — the class weighting did its job. Notably the *smallest* class
-(mosaic virus, 373 images total) scores the joint-highest F1.
+**Macro-F1 sits only 0.028 below weighted-F1**, meaning performance is fairly
+even across classes rather than propped up by the large ones — the class
+weighting worked. Strikingly, the *rarest* class (mosaic virus) scores the
+joint-highest F1, because visual distinctiveness matters more than frequency.
 
-**Where it struggles.** Bacterial spot behaves as a "sink": 0.99 recall but only
-0.54 precision, meaning the model over-predicts it and pulls in leaves from
-other classes. The mirror image is Target Spot — 0.98 precision but 0.38 recall,
-so when it says Target Spot it is nearly always right, but it misses most of
-them. Early blight and Target Spot confuse each other heavily, which is the
-expected cost of training at 64×64: the fine texture distinguishing them is
-largely destroyed at that resolution.
+**Where it struggles:** Bacterial spot acts as a "sink" (0.99 recall, 0.54
+precision — the model retreats to it when uncertain), and Early blight and
+Target spot confuse each other heavily. Both are the expected cost of 64×64
+inputs, which destroy the fine texture that separates them.
 
-**Caveat worth stating plainly:** this model was trained for only **5 epochs**
-with validation loss still falling, on 64×64 inputs, after larger configurations
-proved infeasible on the available hardware (see
-[`INTERVIEW_PREP.md`](INTERVIEW_PREP.md)). These numbers are a **floor**, not a
-converged result.
-
-## Usage
-
-![App screenshot](notebooks/figures/app_screenshots/02_prediction_diseased.png)
-
-### Run the web app
-
-```bash
-# from the repository root, with the venv active
-cd app
-python app.py
-```
-
-Open **http://localhost:5000**, upload a tomato leaf photo, and the app returns
-the top three predictions with confidence bars.
-
-### API
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/` | Upload page |
-| `POST` | `/predict` | Image file field `file` → top-3 predictions as JSON |
-| `GET` | `/health` | Liveness check; 503 if the model failed to load |
-
-```bash
-curl -X POST http://localhost:5000/predict \
-     -F "file=@data/raw/tomato/Tomato___Septoria_leaf_spot/some_leaf.JPG"
-```
-
-```json
-{
-  "top_prediction": "Septoria Leaf Spot",
-  "confidence": 0.998,
-  "predictions": [
-    {"class": "Septoria_leaf_spot", "label": "Septoria Leaf Spot", "confidence": 0.998},
-    {"class": "Late_blight", "label": "Late Blight", "confidence": 0.0006},
-    {"class": "Bacterial_spot", "label": "Bacterial Spot", "confidence": 0.0006}
-  ]
-}
-```
-
-See [`app/README.md`](app/README.md) for the full error-handling table.
+Full analysis in
+[`notebooks/04_evaluation.ipynb`](notebooks/04_evaluation.ipynb).
 
 ---
 
-## Roadmap
+## Setup
 
-| Phase | Deliverable | Status |
-|-------|-------------|--------|
-| 1 | Project structure, dependencies, README | ✅ Done |
-| 2 | Dataset download + exploratory data analysis | ✅ Done |
-| 3 | Preprocessing and augmentation pipeline | ✅ Done |
-| 4 | Build and train the CNN | ⬜ Not started |
-| 5 | Evaluation: accuracy, confusion matrix, error analysis | ⬜ Not started |
-| 6 | Flask web app | ⬜ Not started |
-| 7 | Final README polish and screenshots | ⬜ Not started |
+### Prerequisites
+
+- **Python 3.10–3.12** — TensorFlow publishes no wheels for 3.13+
+- A [Kaggle account](https://www.kaggle.com/) for the dataset
+
+### 1. Clone and create an environment
+
+```bash
+git clone https://github.com/NIKHILis-Coder/CROP-DISEASE-DETECTION.git
+cd CROP-DISEASE-DETECTION
+```
+
+```bash
+# Windows -- "py -3.12" picks a TensorFlow-compatible Python
+py -3.12 -m venv venv
+venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+python3.12 -m venv venv
+source venv/bin/activate
+```
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Kaggle credentials
+
+1. Kaggle → **Settings → API → Create New Token** (downloads `kaggle.json`)
+2. Move it to `C:\Users\<you>\.kaggle\kaggle.json` (Windows) or
+   `~/.kaggle/kaggle.json` (macOS/Linux, then `chmod 600`)
+
+`kaggle.json` is a secret — it is gitignored and must never be committed.
+
+### 4. Download data, train, evaluate, run
+
+```bash
+python src/download_data.py     # fetch + extract the tomato subset (~2 GB)
+python src/data_loader.py       # build the stratified split manifests
+python src/train.py             # timed benchmark only (2 epochs, saves nothing)
+python src/train.py --full      # the real training run
+python src/evaluate.py          # test-set metrics, confusion matrices
+cd app && python app.py         # http://localhost:5000
+```
+
+---
+
+## Project structure
+
+```
+CROP-DISEASE-DETECTION/
+│
+├── data/
+│   ├── raw/                    # PlantVillage images (gitignored)
+│   └── processed/              # split manifests -- CSVs ARE committed
+│
+├── notebooks/
+│   ├── 01_eda.ipynb            # class distribution, samples, image stats
+│   ├── 02_pipeline_check.ipynb # correctness checks on the data pipeline
+│   ├── 04_evaluation.ipynb     # test-set results and interpretation
+│   └── figures/                # every plot embedded in this README
+│
+├── src/
+│   ├── download_data.py        # scripted Kaggle download + tomato extraction
+│   ├── data_loader.py          # manifest, stratified split, tf.data pipeline
+│   ├── model.py                # build_model() -- the CNN
+│   ├── train.py                # benchmark + full training with callbacks
+│   └── evaluate.py             # test metrics, confusion matrices, error grid
+│
+├── models/                     # *.keras gitignored; metrics + logs committed
+│   ├── training_history.json
+│   ├── training_log.txt
+│   ├── evaluation_metrics.json
+│   └── aborted_run_summary.txt # incident record of a killed training run
+│
+├── app/
+│   ├── app.py                  # Flask server
+│   ├── templates/index.html
+│   ├── static/style.css
+│   └── README.md
+│
+├── .github/workflows/ci.yml    # install + import + shape smoke test
+├── INTERVIEW_PREP.md           # design decisions and incident write-ups
+├── INTERVIEW_PREP.pdf          # the same, formatted
+├── requirements.txt
+├── LICENSE
+└── README.md
+```
+
+---
 
 ## Tech stack
 
 | Tool | Role |
 |------|------|
-| TensorFlow / Keras | Define and train the CNN |
-| NumPy / pandas | Numerical arrays and tabular summaries |
-| matplotlib / seaborn | Plots and the confusion-matrix heatmap |
-| scikit-learn | Evaluation metrics |
-| Pillow | Image loading and resizing |
-| Flask | Web app serving the predictions |
-| Kaggle API | Scripted dataset download |
+| **TensorFlow / Keras** | CNN definition, training, `tf.data` input pipeline |
+| **scikit-learn** | Stratified splitting, confusion matrix, classification report |
+| **pandas / NumPy** | Split manifests, tabular summaries, array maths |
+| **matplotlib / seaborn** | Training curves, confusion heatmaps, sample grids |
+| **Pillow** | Image decoding in the web app |
+| **Flask** | Web app serving predictions |
+| **Kaggle API** | Scripted dataset download |
+| **GitHub Actions** | Install + import + model-shape smoke test |
+
+---
+
+## Known limitations
+
+**The lab-vs-field domain gap is the biggest one.** Every PlantVillage image is
+a laboratory photograph of a *single detached leaf on a plain background*. A real
+user photographs a leaf still on the plant, with soil, sky and overlapping
+foliage in frame, under uncontrolled lighting. The test split shares the
+training distribution, so a good test score proves the pipeline works — it does
+**not** prove the model would survive a real phone photo.
+
+**The model is undertrained.** Training stopped at a 5-epoch cap with validation
+loss still falling and early stopping never firing. The reported numbers are a
+**floor**, not a converged result.
+
+**64×64 inputs cost real accuracy.** The resolution was reduced from 128×128
+after two training runs failed to complete on a 7.5 GB laptop under heavy memory
+pressure. Fine texture is lost, which shows up directly as Early blight ↔ Target
+spot confusion.
+
+**No out-of-distribution detection.** A softmax over 10 classes must sum to 1, so
+uploading a photo of a dog returns a confident tomato disease. The app shows
+top-3 confidences and a disclaimer, but cannot say "none of these".
+
+**Class imbalance persists.** 14.4× between largest and smallest, mitigated with
+class weights but not eliminated.
+
+---
+
+## Future work
+
+- **Transfer learning with MobileNetV2 or EfficientNet-B0** — the single highest-
+  value change. Pre-trained ImageNet features would likely reach 95%+ in a
+  fraction of the training time, since the model would no longer need to learn
+  edge and texture detectors from 12,712 images.
+- **Retrain at 128×128 on a GPU** — directly targets the Early blight ↔ Target
+  spot confusion, and removes the constraint that forced the reduction.
+- **Train to convergence** — let early stopping actually fire instead of hitting
+  an epoch cap.
+- **Field-photo data** to close the domain gap, or aggressive background/lighting
+  augmentation as a cheaper approximation.
+- **Out-of-distribution detection** so the app can decline to answer.
+- **Extend beyond tomato** to the full 38-class PlantVillage set once training
+  cost is no longer the binding constraint.
+- **Containerise and deploy** behind Gunicorn with a real WSGI server, plus
+  monitoring of the confidence and predicted-class distributions to detect drift.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Nikhil Rana

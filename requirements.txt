@@ -3,55 +3,57 @@
 #
 # Install everything with:   pip install -r requirements.txt
 #
-# Versions use `>=` (a minimum), not `==` (an exact pin). For a portfolio
-# project this keeps installs flexible across machines. Production projects
-# usually pin exact versions so every deploy is byte-for-byte reproducible.
+# Versions are PINNED (`==`) to what this project was actually built and tested
+# against. A portfolio project someone else clones should install the same
+# versions that produced the reported results -- "it worked on my machine" is
+# not a reproducible result. The trade-off is that these pins will age; loosen
+# them to `>=` if you want newer libraries and are willing to re-verify.
 #
-# NOTE ON PYTHON VERSION: TensorFlow does not publish wheels for Python 3.14
-# yet. Use Python 3.10-3.12 (see the README setup steps).
+# NOTE ON PYTHON VERSION: TensorFlow publishes no wheels for Python 3.13+.
+# Use Python 3.10-3.12 (see the README setup steps).
 # ---------------------------------------------------------------------------
 
 # --- Deep learning ----------------------------------------------------------
 # TensorFlow ships with Keras, the high-level API used to define and train the
-# CNN. Chosen over PyTorch here because Keras' Sequential model is the most
-# readable way to express a small CNN, and its ImageDataGenerator /
-# image_dataset_from_directory helpers read images straight from folders.
-tensorflow>=2.16
+# CNN. Chosen over PyTorch because Keras' Sequential model is the most readable
+# way to express a small CNN, and tf.data handles the input pipeline.
+tensorflow==2.21.0
 
 # --- Web app ---------------------------------------------------------------
-# Flask serves the image-upload page and returns the model's prediction.
-# Chosen over Django because this app is a couple of routes -- Django's admin,
-# ORM and migrations would all go unused.
-flask>=3.0
+# Flask serves the upload page and returns predictions. Chosen over Django
+# because this app is two routes -- Django's ORM, migrations and admin would
+# all sit unused.
+Flask==3.1.3
 
 # --- Numerical / data handling ---------------------------------------------
-# NumPy: array maths. Images become NumPy arrays of pixel values.
-numpy>=1.26
-# pandas: tables. Used in the EDA notebook to count images per class.
-pandas>=2.2
+# NumPy: array maths. Images are NumPy arrays of pixel values.
+numpy==2.5.2
+# pandas: the split manifests and every table in the notebooks.
+pandas==3.0.5
 
 # --- Plotting --------------------------------------------------------------
-# matplotlib: base plotting library (accuracy/loss curves, sample images).
-matplotlib>=3.8
-# seaborn: sits on top of matplotlib; gives a readable confusion-matrix
-# heatmap in one line instead of ~15 lines of matplotlib.
-seaborn>=0.13
+# matplotlib: base plotting (training curves, sample grids, misclassifications).
+matplotlib==3.11.1
+# seaborn: confusion-matrix heatmaps in one line instead of ~15 of matplotlib.
+seaborn==0.13.2
 
 # --- Metrics / evaluation ---------------------------------------------------
-# scikit-learn: confusion_matrix and classification_report (precision, recall,
-# F1). Used only for evaluation, not for training the model.
-scikit-learn>=1.4
+# scikit-learn: stratified train/test splitting, confusion_matrix, and
+# classification_report (precision, recall, F1). Not used for training.
+scikit-learn==1.9.0
 
 # --- Image loading ----------------------------------------------------------
-# Pillow: opens/resizes JPEG and PNG files. Keras and Flask both use it under
-# the hood to turn an uploaded file into pixels.
-pillow>=10.2
+# Pillow: decodes uploaded images in the Flask app and reads image metadata in
+# the EDA notebook. NOTE: resizing is done with tf.image.resize, not Pillow --
+# the two are not equivalent when downscaling. See app/app.py for why.
+pillow==12.3.0
 
 # --- Dataset download -------------------------------------------------------
-# Official Kaggle API client -- downloads the PlantVillage dataset from the
-# command line so the process is scripted and repeatable, not a manual click.
-kaggle>=1.6
+# Official Kaggle API client -- downloads PlantVillage from the command line so
+# the process is scripted and repeatable, not a manual click.
+kaggle==2.2.4
 
 # --- Notebooks --------------------------------------------------------------
-# Needed to run the exploratory-data-analysis notebook in notebooks/.
-jupyter>=1.0
+# Needed to run the notebooks in notebooks/.
+jupyter==1.1.1
+notebook==7.6.2
