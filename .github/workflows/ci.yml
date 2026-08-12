@@ -1,0 +1,83 @@
+# Minimal CI smoke test.
+#
+# This deliberately does NOT train a model or download the dataset -- both are
+# far too slow and heavy for CI, and the dataset needs Kaggle credentials.
+# What it does check is the thing most likely to break silently: that the
+# package installs cleanly on a fresh machine and the modules actually import.
+#
+# An import is a surprisingly strong test for this project. `src/model.py`
+# builds and compiles the network at import-check time below, so a broken layer
+# configuration, a bad TensorFlow API call, or a missing dependency all fail
+# here rather than three hours into someone else's training run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 specifically: TensorFlow publishes no wheels for 3.13+, so a
+          # newer default would fail at the install step.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Import project modules
+        run: |
+          python -c "
+          import src.model as m
+          import src.data_loader as d
+          print('src.model and src.data_loader imported OK')
+          print('IMAGE_SIZE :', d.IMAGE_SIZE)
+          print('BATCH_SIZE :', d.BATCH_SIZE)
+          print('CACHE      :', d.CACHE_ENABLED)
+          print('SHUFFLE_BUF:', d.SHUFFLE_BUFFER_SIZE)
+          "
+
+      - name: Build the model and check its shape
+        run: |
+          python -c "
+          from src.model import build_model
+          model = build_model()
+          params = model.count_params()
+          print(f'Model built: {params:,} parameters')
+          assert model.input_shape[1:] == (64, 64, 3), model.input_shape
+          assert model.output_shape[1:] == (10,), model.output_shape
+          assert params > 0
+          print('Input/output shapes OK')
+          "
+
+      - name: Check the split manifests are present and consistent
+        run: |
+          python -c "
+          import pandas as pd
+          from pathlib import Path
+          total = 0
+          for name in ('train', 'val', 'test'):
+              df = pd.read_csv(Path('data/processed') / f'{name}_manifest.csv')
+              assert {'filepath', 'label'} <= set(df.columns), df.columns
+              assert len(df) > 0
+              total += len(df)
+              print(f'{name:>5}: {len(df):>6,} rows, {df[\"label\"].nunique()} classes')
+          print(f'total: {total:,} rows')
+          assert total == 18160, f'expected 18,160 images, found {total}'
+          print('Manifests OK')
+          "

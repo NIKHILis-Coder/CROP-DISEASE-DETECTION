@@ -91,24 +91,31 @@ CACHE_ENABLED = False
 
 # Upper bound on the tf.data shuffle buffer, in images.
 #
-# 2,048 decoded uint8 images at 128x128x3 is ~94 MB -- a memory cost that stays
+# 2,048 decoded uint8 images at 64x64x3 is ~24 MB -- a memory cost that stays
 # predictable regardless of dataset size. Deliberately NOT len(dataset): the
 # shuffle sits after decoding, so the buffer holds pixels rather than paths.
 SHUFFLE_BUFFER_SIZE = 2048
 
-# 128x128 is the compromise between detail and CPU training time.
+# 64x64. Reduced from an original 128x128 after two training runs failed to
+# complete on this machine.
 #
-# The source images are 256x256. Halving each side quarters the pixel count, so
-# roughly a quarter of the convolution work per image -- the difference between
-# iterating on the architecture a few times in an evening and waiting overnight.
-# We do not go smaller: at 96x96 the fine speckling that distinguishes Septoria
-# leaf spot from Target Spot starts to smear together, and the model cannot
-# learn a feature the input no longer contains.
-IMAGE_SIZE = (128, 128)
+# The source images are 256x256. Quartering each side cuts the pixel count 16x
+# and the convolution work per image by roughly the same factor, which takes an
+# epoch from ~9 minutes to well under two. The binding constraint here was never
+# accuracy -- it was that a 7.5 GB laptop under 18-21 GB of commit charge could
+# not sustain the larger configuration long enough to finish 15 epochs. See
+# INTERVIEW_PREP.md "The paging incident" and "Final training configuration".
+#
+# The cost is real and worth stating plainly: at 64x64 the fine speckling that
+# separates Septoria leaf spot from Target Spot is largely gone, so those two
+# classes should be expected to confuse more than they would at 128x128. That is
+# a deliberate accuracy-for-feasibility trade, not an oversight.
+IMAGE_SIZE = (64, 64)
 
-# 32 is the conventional default and suits CPU training: large enough that the
-# gradient estimate is not too noisy, small enough to fit comfortably in RAM.
-BATCH_SIZE = 32
+# 16 rather than 32: halves the activation memory held per step. Smaller batches
+# give noisier gradient estimates, which at this scale is a mild regulariser
+# rather than a problem.
+BATCH_SIZE = 16
 
 # 70 / 15 / 15. Training gets the bulk; 15% of 18,160 is ~2,700 images for each
 # of validation and test, which is plenty to measure performance stably even for

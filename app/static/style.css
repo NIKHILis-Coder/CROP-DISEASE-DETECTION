@@ -1,0 +1,152 @@
+/* Crop Disease Detection -- minimal styling, no framework dependencies.
+   Goal is "usable and clear", not a design showcase. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1rem 3rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f6f4;
+  color: #1f2a24;
+  line-height: 1.5;
+}
+
+main { max-width: 620px; margin: 0 auto; }
+
+header { text-align: center; margin-bottom: 1.75rem; }
+h1 { font-size: 1.6rem; margin: 0 0 .4rem; }
+h2 { font-size: 1.1rem; margin: 0 0 .3rem; }
+.sub { color: #5d6b62; font-size: .9rem; margin: 0 0 1rem; }
+
+.card {
+  background: #fff;
+  border: 1px solid #e0e6e1;
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+/* --- Dropzone --- */
+.dropzone {
+  border: 2px dashed #bcc9c0;
+  border-radius: 8px;
+  padding: 2.25rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.dragging { border-color: #4a8f5f; background: #f2f8f4; }
+.dz-icon { font-size: 2rem; margin-bottom: .4rem; }
+.dz-inner p { margin: .2rem 0; }
+.hint { color: #7c8a81; font-size: .82rem; }
+
+/* --- Preview --- */
+.preview img {
+  width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #f0f3f1;
+}
+.preview-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: .75rem;
+  margin-top: .6rem;
+}
+.filename {
+  font-size: .82rem;
+  color: #5d6b62;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Buttons --- */
+.btn {
+  width: 100%;
+  margin-top: 1rem;
+  padding: .75rem 1rem;
+  font-size: .95rem;
+  font-weight: 600;
+  color: #fff;
+  background: #3f7d54;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { background: #356946; }
+.btn:disabled { background: #b9c6bd; cursor: not-allowed; }
+
+.btn-secondary {
+  padding: .4rem .7rem;
+  font-size: .82rem;
+  color: #3f7d54;
+  background: #fff;
+  border: 1px solid #c3d2c8;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-secondary:hover { background: #f2f8f4; }
+
+/* --- Banners --- */
+.banner {
+  padding: .7rem .9rem;
+  border-radius: 7px;
+  font-size: .88rem;
+  margin-bottom: 1rem;
+  background: #eef3ef;
+  border: 1px solid #d8e2db;
+}
+.banner.error { background: #fdeeee; border-color: #f2c9c9; color: #8f2f2f; }
+
+/* --- Predictions --- */
+.predictions { list-style: none; padding: 0; margin: .75rem 0 0; }
+.pred { margin-bottom: .85rem; }
+.pred-head {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .88rem;
+  margin-bottom: .3rem;
+}
+.rank {
+  flex: none;
+  width: 1.3rem; height: 1.3rem;
+  display: grid; place-items: center;
+  font-size: .72rem; font-weight: 700;
+  color: #5d6b62;
+  background: #eef3ef;
+  border-radius: 50%;
+}
+.name { flex: 1; }
+.pct { font-variant-numeric: tabular-nums; font-weight: 600; color: #5d6b62; }
+
+.pred.top .name { font-weight: 700; }
+.pred.top .pct { color: #3f7d54; }
+
+.bar { height: 7px; background: #eef3ef; border-radius: 4px; overflow: hidden; }
+.fill { height: 100%; background: #9dc4ac; border-radius: 4px; }
+.pred.top .fill { background: #3f7d54; }
+
+/* --- Footer --- */
+footer { margin-top: 1.5rem; }
+.disclaimer {
+  font-size: .78rem;
+  color: #6b786f;
+  background: #eef1ef;
+  border-left: 3px solid #c3d2c8;
+  padding: .7rem .85rem;
+  border-radius: 0 6px 6px 0;
+  margin: 0;
+}
+
+code {
+  background: #eef1ef;
+  padding: .1rem .3rem;
+  border-radius: 3px;
+  font-size: .85em;
+}

@@ -44,8 +44,15 @@ from src.model import build_model  # noqa: E402
 MODELS_DIR = PROJECT_ROOT / "models"
 FIGURES_DIR = PROJECT_ROOT / "notebooks" / "figures"
 
-DEFAULT_EPOCHS = 30
+DEFAULT_EPOCHS = 5
 EARLY_STOPPING_PATIENCE = 5
+
+# Refuse to start below this much free RAM. Two earlier runs on this machine
+# were killed after paging themselves to a standstill -- the second reached
+# only 1 of 15 epochs in 156 minutes at 0.91x CPU parallelism. Both were
+# launched when available memory was already marginal. Failing fast at startup
+# is far better than discovering the problem three hours in.
+MIN_AVAILABLE_RAM_MB = 700
 # Shorter than the early-stopping patience on purpose: try a smaller learning
 # rate before giving up on the run entirely.
 REDUCE_LR_PATIENCE = 3
@@ -255,6 +262,12 @@ def run_full_training(model: tf.keras.Model, train_ds, val_ds, class_weights, ep
             save_best_only=True,
             verbose=0,
         ),
+        # Append each epoch's metrics to disk AS THEY HAPPEN. Learned the hard
+        # way: training_history.json below is only written when fit() returns,
+        # so when a run had to be killed mid-flight its entire per-epoch history
+        # was lost while the checkpoints survived -- because checkpoints are
+        # written incrementally and the history was not. This closes that gap.
+        tf.keras.callbacks.CSVLogger(str(MODELS_DIR / "training_log.csv")),
     ]
 
     print(f"\nTraining for up to {epochs} epochs "
@@ -402,8 +415,55 @@ def plot_history(history: dict) -> None:
 
 # --- Entry point -----------------------------------------------------------
 
+def check_available_ram() -> None:
+    """Warn (or refuse) if the machine does not have enough free RAM.
+
+    Uses whatever is available without adding a dependency: psutil if present,
+    otherwise a WMI query on Windows. If neither works, we let training proceed
+    rather than blocking on a diagnostic.
+    """
+    available_mb = None
+
+    try:
+        import psutil  # type: ignore
+
+        available_mb = psutil.virtual_memory().available / 1024**2
+    except ImportError:
+        if sys.platform == "win32":
+            try:
+                import subprocess
+
+                out = subprocess.check_output(
+                    ["wmic", "OS", "get", "FreePhysicalMemory", "/value"],
+                    text=True, stderr=subprocess.DEVNULL,
+                )
+                available_mb = int(out.split("=")[1].strip()) / 1024
+            except Exception:
+                pass
+
+    if available_mb is None:
+        print("\n[ram guard] Could not measure available RAM -- continuing anyway.")
+        return
+
+    print(f"\n[ram guard] Available RAM: {available_mb:,.0f} MB "
+          f"(minimum {MIN_AVAILABLE_RAM_MB:,} MB)")
+
+    if available_mb < MIN_AVAILABLE_RAM_MB:
+        sys.exit(
+            f"\nRefusing to start: only {available_mb:,.0f} MB of RAM is free.\n"
+            "Training on this machine pages itself to a standstill below roughly\n"
+            f"{MIN_AVAILABLE_RAM_MB:,} MB. Close some applications and try again,\n"
+            "or pass --skip-ram-check to override."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--skip-ram-check",
+        action="store_true",
+        help="Start training even if available RAM is below the safe threshold.",
+    )
     parser.add_argument(
         "--full",
         action="store_true",
@@ -418,6 +478,9 @@ def main() -> None:
     print("=" * 74)
     print(f"TensorFlow {tf.__version__} | devices: "
           f"{[d.device_type for d in tf.config.list_physical_devices()]}")
+
+    if not args.skip_ram_check:
+        check_available_ram()
 
     train_ds, val_ds, _, class_names = load_splits(batch_size=args.batch_size)
     manifests = load_split_manifests()

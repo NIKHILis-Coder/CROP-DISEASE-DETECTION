@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crop Disease Detection</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>🍅 Tomato Leaf Disease Detection</h1>
+      <p class="sub">Upload a photo of a tomato leaf and the model will identify the most likely disease.</p>
+    </header>
+
+    {% if not model_loaded %}
+    <div class="banner error">
+      <strong>Model not loaded.</strong> Train it first with
+      <code>python src/train.py --full</code>, then restart this app.
+    </div>
+    {% endif %}
+
+    <!-- Upload -->
+    <section class="card">
+      <div id="dropzone" class="dropzone">
+        <input type="file" id="fileInput" accept=".jpg,.jpeg,.png" hidden>
+        <div class="dz-inner">
+          <div class="dz-icon">🌿</div>
+          <p><strong>Click to choose an image</strong> or drag one here</p>
+          <p class="hint">JPG or PNG, up to 8 MB</p>
+        </div>
+      </div>
+
+      <div id="preview" class="preview" hidden>
+        <img id="previewImg" alt="Uploaded leaf">
+        <div class="preview-actions">
+          <span id="fileName" class="filename"></span>
+          <button id="clearBtn" type="button" class="btn-secondary">Choose another</button>
+        </div>
+      </div>
+
+      <button id="predictBtn" class="btn" disabled>Analyse leaf</button>
+    </section>
+
+    <!-- Status / errors -->
+    <div id="status" class="banner" hidden></div>
+
+    <!-- Results -->
+    <section id="results" class="card" hidden>
+      <h2>Predictions</h2>
+      <p class="sub">Ranked by confidence. The model always returns its top three, so you can see how close the call was.</p>
+      <ul id="predictionList" class="predictions"></ul>
+    </section>
+
+    <footer>
+      <p class="disclaimer">
+        <strong>Disclaimer:</strong> Trained on the lab-photo PlantVillage dataset —
+        single detached leaves on plain backgrounds. Real-world field photos, with
+        soil, sky and overlapping foliage in frame, may perform worse (domain gap).
+        This is a portfolio demonstration, not agricultural advice.
+      </p>
+    </footer>
+  </main>
+
+<script>
+const dropzone    = document.getElementById('dropzone');
+const fileInput   = document.getElementById('fileInput');
+const preview     = document.getElementById('preview');
+const previewImg  = document.getElementById('previewImg');
+const fileName    = document.getElementById('fileName');
+const clearBtn    = document.getElementById('clearBtn');
+const predictBtn  = document.getElementById('predictBtn');
+const statusBox   = document.getElementById('status');
+const results     = document.getElementById('results');
+const predList    = document.getElementById('predictionList');
+
+let selectedFile = null;
+
+function showStatus(message, kind) {
+  statusBox.textContent = message;
+  statusBox.className = 'banner ' + (kind || '');
+  statusBox.hidden = false;
+}
+function hideStatus() { statusBox.hidden = true; }
+
+function selectFile(file) {
+  if (!file) return;
+  const ok = ['image/jpeg', 'image/png'].includes(file.type);
+  if (!ok) { showStatus('Please choose a JPG or PNG image.', 'error'); return; }
+
+  selectedFile = file;
+  hideStatus();
+  results.hidden = true;
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    previewImg.src = e.target.result;
+    fileName.textContent = file.name;
+    preview.hidden = false;
+    dropzone.hidden = true;
+    predictBtn.disabled = false;
+  };
+  reader.readAsDataURL(file);
+}
+
+dropzone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => selectFile(e.target.files[0]));
+
+['dragenter', 'dragover'].forEach(evt =>
+  dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('dragging'); }));
+['dragleave', 'drop'].forEach(evt =>
+  dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('dragging'); }));
+dropzone.addEventListener('drop', e => selectFile(e.dataTransfer.files[0]));
+
+clearBtn.addEventListener('click', () => {
+  selectedFile = null;
+  fileInput.value = '';
+  preview.hidden = true;
+  dropzone.hidden = false;
+  predictBtn.disabled = true;
+  results.hidden = true;
+  hideStatus();
+});
+
+predictBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  predictBtn.disabled = true;
+  predictBtn.textContent = 'Analysing…';
+  hideStatus();
+
+  const body = new FormData();
+  body.append('file', selectedFile);
+
+  try {
+    const response = await fetch('/predict', { method: 'POST', body });
+    const data = await response.json();
+
+    if (!response.ok) {
+      showStatus(data.error || 'Prediction failed. Please try again.', 'error');
+    } else {
+      predList.innerHTML = '';
+      data.predictions.forEach((p, i) => {
+        const pct = (p.confidence * 100).toFixed(1);
+        const li = document.createElement('li');
+        li.className = i === 0 ? 'pred top' : 'pred';
+        li.innerHTML =
+          '<div class="pred-head"><span class="rank">' + (i + 1) + '</span>' +
+          '<span class="name">' + p.label + '</span>' +
+          '<span class="pct">' + pct + '%</span></div>' +
+          '<div class="bar"><div class="fill" style="width:' + pct + '%"></div></div>';
+        predList.appendChild(li);
+      });
+      results.hidden = false;
+    }
+  } catch (err) {
+    showStatus('Could not reach the server. Is the app still running?', 'error');
+  } finally {
+    predictBtn.disabled = false;
+    predictBtn.textContent = 'Analyse leaf';
+  }
+});
+</script>
+</body>
+</html>

@@ -827,6 +827,79 @@ Two corollaries:
   immediately and unambiguously: a compute-bound process getting 1.5 cores out of
   6 is not slow, it is *blocked*.
 
+### Final training configuration — engineering to the constraint
+
+Two training runs were killed before completing: the first (128×128, batch 32,
+30 epochs) reached ~11 of 30 epochs in 5 h 21 min; the second, after the shuffle
+fix, reached 1 of 15 in 156 minutes at **0.91× CPU parallelism**. Both died to
+the same underlying cause — a 7.5 GB laptop carrying 18–21 GB of commit charge
+had no memory left to give.
+
+At that point the honest engineering decision is to stop trying to make the
+machine do something it cannot, and change the shape of the problem:
+
+| | Original | Final | Effect |
+|---|---|---|---|
+| Input size | 128×128 | **64×64** | 4× fewer pixels, ~4× fewer MACs |
+| Batch size | 32 | **16** | half the activation memory per step |
+| Epoch cap | 30 | **5** | bounded total runtime |
+| Cache | disk | **off** | no 1.1 GB of cache I/O |
+| Shuffle buffer | `len(dataset)` | **2,048** | ~596 MB → ~24 MB |
+| RAM guard | none | **≥700 MB at startup** | fails fast instead of at hour three |
+
+**Result: the run completed in 14.5 minutes** at 5.4–6.2× CPU parallelism — the
+healthy range — versus 0.91× when it was thrashing.
+
+**What this trade actually costs.** At 64×64 the fine speckling that separates
+Septoria leaf spot from Target Spot is largely destroyed. Those classes should
+be expected to confuse more than they would at 128×128. That is a deliberate
+accuracy-for-feasibility trade, and the right way to present it is as a
+documented constraint with a named remedy (retrain at 128×128 on a GPU), not as
+a silent choice.
+
+**The RAM guard is the durable lesson.** `train.py` now measures available
+memory at startup and refuses to launch below 700 MB. Two runs were lost to a
+condition that was measurable *before* either started — the information was
+there, nothing was checking it. Cheap preconditions on expensive operations are
+almost always worth writing.
+
+### Actual training results
+
+| | |
+|---|---|
+| Epochs run | **5 of 5** (cap reached; early stopping did not fire) |
+| Best epoch | **5** — the last one |
+| Total wall-clock | **14.5 min** (158–207 s/epoch) |
+| Final train | loss **0.4605**, accuracy **84.75%** |
+| Final validation | loss **0.7525**, accuracy **75.11%** |
+| EarlyStopping | not triggered |
+| ReduceLROnPlateau | not triggered — LR stayed at 1e-3 throughout |
+
+Per-epoch:
+
+| Epoch | Train loss | Train acc | Val loss | Val acc |
+|---|---:|---:|---:|---:|
+| 1 | 1.2301 | 58.89% | 2.9081 | 27.46% |
+| 2 | 0.7849 | 73.40% | 2.8879 | 38.73% |
+| 3 | 0.6474 | 78.29% | 2.9643 | 46.04% |
+| 4 | 0.5307 | 82.38% | **0.8263** | **75.18%** |
+| 5 | 0.4605 | 84.75% | **0.7525** | 75.11% |
+
+**The BatchNorm warm-up prediction was confirmed.** For three epochs validation
+loss sat near 2.9 while training loss fell steadily from 1.23 to 0.65 — exactly
+the train/inference mismatch predicted after the very first benchmark. Then at
+epoch 4 it collapsed from 2.96 to 0.83 and validation accuracy jumped from 46%
+to 75%. That is not a gradual convergence curve; it is the moment BatchNorm's
+moving averages became good enough for inference mode to match training mode.
+Anyone who had killed this run at epoch 3 would have concluded the model was
+broken.
+
+**The run ended because it hit the cap, not because it converged.** Validation
+loss was still falling at epoch 5 (0.826 → 0.753) and early stopping never
+fired. The model is **undertrained**, and its reported numbers are a floor
+rather than a ceiling. Saying so is more useful than presenting 5 epochs as if
+it were a converged result.
+
 **Q: Why run a one-epoch benchmark at all instead of just training?**
 A: Two reasons, and the second is the one people underrate. First, it converts an
 unknown into a number: 8.6 minutes per epoch means 30 epochs is 4.3 hours, which

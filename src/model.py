@@ -3,7 +3,7 @@ model.py -- the CNN architecture.
 
 THE ARCHITECTURE, LAYER BY LAYER
 --------------------------------
-    Input (128, 128, 3)          one RGB image, pixels already scaled to [0,1]
+    Input (64, 64, 3)            one RGB image, pixels already scaled to [0,1]
 
     Conv2D(32, 3x3, relu)        learns 32 simple local patterns (edges, colour blobs)
     BatchNormalization           rescales activations so the next layer sees stable inputs
@@ -27,7 +27,7 @@ WHY THIS SHAPE
 Three conv blocks, 32 -> 64 -> 128 filters. Each block halves the spatial size and
 doubles the filter count -- the standard CNN trade: as you learn about *larger*
 regions of the image, you need *more* kinds of pattern to describe them. Three
-blocks takes 128x128 down to 16x16, which is small enough to summarise but still
+blocks takes 64x64 down to 8x8, which is small enough to summarise but still
 large enough to preserve where things are. A fourth block would roughly double
 CPU time per epoch for a model already at risk of overfitting 12,712 images.
 """
@@ -39,7 +39,7 @@ import tensorflow as tf
 # The number of tomato classes. Passed in rather than hardcoded at the call site
 # so a change to the dataset cannot silently mismatch the output layer.
 NUM_CLASSES = 10
-INPUT_SHAPE = (128, 128, 3)
+INPUT_SHAPE = (64, 64, 3)
 
 # Adam's default. Small enough to be stable, large enough to make progress.
 # If training diverges (loss -> NaN) this is the first knob to turn down.
@@ -56,7 +56,7 @@ def build_model(
 
     Every layer, in one line each:
 
-    * ``Input(128, 128, 3)`` -- one resized RGB image; pixels are already scaled
+    * ``Input(64, 64, 3)`` -- one resized RGB image; pixels are already scaled
       to [0,1] by the data pipeline, so no rescaling layer is needed here.
     * ``Conv2D(32, 3x3, relu)`` -- slides 32 small filters over the image to
       detect simple local patterns; 3x3 is the standard smallest useful window.
@@ -72,8 +72,8 @@ def build_model(
       of pattern, each describing a larger area of the original leaf.
     * ``Conv2D(128, ...)`` -- the same step once more; these filters respond to
       disease-scale structure such as a lesion's shape and border.
-    * ``GlobalAveragePooling2D`` -- collapses each 16x16 feature map to its
-      average, giving 128 numbers; a Flatten here would give 32,768 instead.
+    * ``GlobalAveragePooling2D`` -- collapses each 8x8 feature map to its
+      average, giving 128 numbers; a Flatten here would give 8,192 instead.
     * ``Dense(128, relu)`` -- lets the model combine those features non-linearly
       before committing to a class.
     * ``Dropout(0.5)`` -- randomly zeroes half these units per training step, so
@@ -100,7 +100,7 @@ def build_model(
             # --- Block 1: simple local patterns -- edges, colour transitions ---
             # padding="same" keeps the spatial size unchanged through the conv,
             # so only the pooling layers change it. That makes the size
-            # arithmetic easy to follow: 128 -> 64 -> 32 -> 16.
+            # arithmetic easy to follow: 64 -> 32 -> 16 -> 8.
             tf.keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same", name="conv1"),
             tf.keras.layers.BatchNormalization(name="bn1"),
             tf.keras.layers.MaxPooling2D((2, 2), name="pool1"),
